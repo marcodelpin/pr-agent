@@ -1,0 +1,49 @@
+# PR-Agent Local Review Server
+# =============================
+# HTTP API for code reviews with Ollama
+#
+# Build:
+#   docker build -f docker/Dockerfile.local-review -t pr-agent-review .
+#
+# Run:
+#   docker run -d --name pr-review \
+#     -p 8080:8080 \
+#     -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+#     pr-agent-review
+
+FROM python:3.12.10-slim AS base
+
+# Install git (required for diff operations)
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y git curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy and install dependencies
+COPY pyproject.toml requirements.txt ./
+COPY docs docs/
+RUN pip install --no-cache-dir . && \
+    pip install --no-cache-dir httpx && \
+    rm -rf pyproject.toml requirements.txt
+
+# Copy application code
+COPY pr_agent pr_agent/
+
+# Environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV OLLAMA_BASE_URL=http://host.docker.internal:11434
+ENV PR_AGENT_MODEL=ollama/qwen3-coder:30b
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Expose port
+EXPOSE 8080
+
+# Run the local review server
+CMD ["python", "-m", "uvicorn", "pr_agent.servers.local_review_server:app", \
+     "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]
