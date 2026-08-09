@@ -46,6 +46,7 @@ patch_extra_lines_after = 1 # Number of extra lines (+3 default ones) to include
 secret_provider="" # "" (disabled), "google_cloud_storage", or "aws_secrets_manager" for secure secret management
 cli_mode=false
 output_relevant_configurations=false
+output_run_details=false # if true, append an agent run details section (model, tokens, time cost, AI calls) to generated PR comments
 large_patch_policy = "clip" # "clip", "skip"
 duplicate_prompt_examples = false
 # Persistent inline comments (issue #2037): when true, the GitHub and GitLab providers
@@ -361,6 +362,7 @@ failure_callback = []
 service_callback = []
 callback_timeout_seconds = 30 # max seconds to wait for pending litellm callbacks to flush before exiting
 # model_id = "" # Optional: Custom inference profile ID for Amazon Bedrock
+cache_control_injection_points = [] # Optional: enable Anthropic prompt caching via LiteLLM, e.g. [{location = "message", role = "system"}] (https://docs.litellm.ai/docs/tutorials/prompt_caching)
 
 [openrouter]
 # OpenRouter provider routing, reasoning control and output cap. These apply only
