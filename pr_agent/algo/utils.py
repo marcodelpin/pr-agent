@@ -24,7 +24,8 @@ from pydantic import BaseModel
 from starlette_context import context
 
 from pr_agent.algo import MAX_TOKENS
-from pr_agent.algo.git_patch_processing import extract_hunk_lines_from_patch
+from pr_agent.algo.git_patch_processing import (extract_hunk_headers,
+                                                extract_hunk_lines_from_patch)
 from pr_agent.algo.run_details import get_run_details
 from pr_agent.algo.token_handler import TokenEncoder
 from pr_agent.algo.types import FilePatchInfo
@@ -1167,7 +1168,7 @@ def find_line_number_of_relevant_line_in_file(diff_files: List[FilePatchInfo],
                     if line.startswith('@@'):
                         delta = 0
                         match = re_hunk_header.match(line)
-                        start1, size1, start2, size2 = map(int, match.groups()[:4])
+                        section_header, size1, size2, start1, start2 = extract_hunk_headers(match)
                     elif not line.startswith('-'):
                         delta += 1
 
@@ -1189,7 +1190,7 @@ def find_line_number_of_relevant_line_in_file(diff_files: List[FilePatchInfo],
                     if line.startswith('@@'):
                         delta = 0
                         match = re_hunk_header.match(line)
-                        start1, size1, start2, size2 = map(int, match.groups()[:4])
+                        section_header, size1, size2, start1, start2 = extract_hunk_headers(match)
                     elif not line.startswith('-'):
                         delta += 1
 
@@ -1204,7 +1205,7 @@ def find_line_number_of_relevant_line_in_file(diff_files: List[FilePatchInfo],
                         if line.startswith('@@'):
                             delta = 0
                             match = re_hunk_header.match(line)
-                            start1, size1, start2, size2 = map(int, match.groups()[:4])
+                            section_header, size1, size2, start1, start2 = extract_hunk_headers(match)
                         elif not line.startswith('-'):
                             delta += 1
 
@@ -1294,7 +1295,7 @@ def github_action_output(output_data: dict, key_name: str):
 def show_relevant_configurations(relevant_section: str) -> str:
     skip_keys = ['ai_disclaimer', 'ai_disclaimer_title', 'ANALYTICS_FOLDER', 'secret_provider', "skip_keys", "app_id", "redirect",
                       'trial_prefix_message', 'no_eligible_message', 'identity_provider', 'ALLOWED_REPOS','APP_NAME']
-    extra_skip_keys = get_settings().config.get('config.skip_keys', [])
+    extra_skip_keys = get_settings().config.get("skip_keys", [])
     if extra_skip_keys:
         skip_keys.extend(extra_skip_keys)
 
