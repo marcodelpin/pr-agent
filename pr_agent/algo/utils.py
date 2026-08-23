@@ -182,8 +182,8 @@ def convert_to_markdown_v2(output_data: dict,
     if gfm_supported:
         markdown_text += "<table>\n"
 
-    todo_summary = output_data['review'].pop('todo_summary', '')
-    for key, value in output_data['review'].items():
+    review_data = {k: v for k, v in output_data["review"].items() if k != "todo_summary"}
+    for key, value in review_data.items():
         if value is None or value == '' or value == {} or value == []:
             if key.lower() not in ['can_be_split', 'key_issues_to_review']:
                 continue
@@ -225,6 +225,12 @@ def convert_to_markdown_v2(output_data: dict,
         elif 'ticket compliance check' in key_nice.lower():
             markdown_text = ticket_markdown_logic(emoji, markdown_text, value, gfm_supported)
         elif 'contribution time cost estimate' in key_nice.lower():
+            if not isinstance(value, dict) or not all(
+                    isinstance(value.get(case), str)
+                    for case in ("best_case", "average_case", "worst_case")):
+                get_logger().warning("Skipping malformed contribution time estimate",
+                                     artifact={"value": value})
+                continue
             if gfm_supported:
                 markdown_text += f"<tr><td>{emoji}&nbsp;<strong>Contribution time estimate</strong> (best, average, worst case): "
                 best = _expand_minute_suffix(value['best_case'])
@@ -390,6 +396,8 @@ def ticket_markdown_logic(emoji, markdown_text, value, gfm_supported) -> str:
     # Track compliance levels across all tickets
     all_compliance_levels = []
 
+    if isinstance(value, dict):
+        value = [value]
     if isinstance(value, list):
         for ticket_analysis in value:
             try:
@@ -1010,6 +1018,15 @@ def get_user_labels(current_labels: List[str] = None):
     return user_labels
 
 
+def _as_int(value, default: int = 0) -> int:
+    """Coerce a settings value to int, tolerating the quoted numbers TOML allows."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        get_logger().warning(f"Expected a number in configuration, got {value!r}; using {default}")
+        return default
+
+
 def get_max_tokens(model):
     """
     Get the maximum number of tokens allowed for a model.
@@ -1021,16 +1038,18 @@ def get_max_tokens(model):
     This aims to improve the algorithmic quality, as the AI model degrades in performance when the input is too long.
     """
     settings = get_settings()
+    custom_max_tokens = _as_int(settings.config.custom_model_max_tokens)
     if model in MAX_TOKENS:
         max_tokens_model = MAX_TOKENS[model]
-    elif settings.config.custom_model_max_tokens > 0:
-        max_tokens_model = settings.config.custom_model_max_tokens
+    elif custom_max_tokens > 0:
+        max_tokens_model = custom_max_tokens
     else:
         get_logger().error(f"Model {model} is not defined in MAX_TOKENS in ./pr_agent/algo/__init__.py and no custom_model_max_tokens is set")
         raise Exception(f"Ensure {model} is defined in MAX_TOKENS in ./pr_agent/algo/__init__.py or set a positive value for it in config.custom_model_max_tokens")
 
-    if settings.config.max_model_tokens and settings.config.max_model_tokens > 0:
-        max_tokens_model = min(settings.config.max_model_tokens, max_tokens_model)
+    max_model_tokens = _as_int(settings.config.max_model_tokens) if settings.config.max_model_tokens else 0
+    if max_model_tokens > 0:
+        max_tokens_model = min(max_model_tokens, max_tokens_model)
     return max_tokens_model
 
 
@@ -1099,6 +1118,14 @@ def clip_tokens(text: str, max_tokens: int, add_three_dots=True, num_input_token
         result stays within the token limit, as character-to-token ratios can vary.
         If token encoding fails, the original text is returned with a warning logged.
     """
+    try:
+        max_tokens = int(max_tokens)
+    except (TypeError, ValueError, OverflowError):
+        get_logger().warning(
+            f"clip_tokens got a non-numeric max_tokens ({max_tokens!r}); returning the text "
+            f"unclipped, which may exceed the model's context window")
+        return text
+
     if not text:
         return text
 
@@ -1178,6 +1205,10 @@ def find_line_number_of_relevant_line_in_file(diff_files: List[FilePatchInfo],
                     if absolute_position_curr == absolute_position:
                         position = i
                         break
+            elif not relevant_line_in_file:
+                get_logger().warning("Cannot locate an empty relevant line in a patch",
+                                     artifact={"relevant_file": relevant_file})
+                continue
             else:
                 # try to find the line in the patch using difflib, with some margin of error
                 matches_difflib: list[str | Any] = difflib.get_close_matches(relevant_line_in_file,
