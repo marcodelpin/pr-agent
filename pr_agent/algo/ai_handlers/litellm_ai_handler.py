@@ -69,6 +69,10 @@ class LiteLLMAIHandler(BaseAiHandler):
             # provider env vars (OPENROUTER_API_KEY, AZURE_API_KEY, ...) in LiteLLM's
             # resolution chain, so a placeholder there silently shadows them.
             litellm.openai_key = DUMMY_LITELLM_API_KEY
+        # Custom Bedrock endpoint (e.g. a VPC endpoint interface endpoint); litellm reads this
+        # directly from the environment regardless of the credentials model below
+        if not os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT") and get_settings().get("aws.AWS_BEDROCK_RUNTIME_ENDPOINT"):
+            os.environ["AWS_BEDROCK_RUNTIME_ENDPOINT"] = get_settings().aws.AWS_BEDROCK_RUNTIME_ENDPOINT
         if os.environ.get("AWS_USE_IMDS", "").strip().lower() in ("1", "true", "yes"):
             import boto3
             import botocore.exceptions
@@ -687,6 +691,17 @@ class LiteLLMAIHandler(BaseAiHandler):
                 # https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
                 if (model in self.claude_extended_thinking_models) and get_settings().config.get("enable_claude_extended_thinking", False):
                     kwargs = self._configure_claude_extended_thinking(model, kwargs)
+
+                # Optional output token limit; 0 = unset. Without max_tokens some
+                # providers apply a low service-side default (Bedrock Converse: 4096,
+                # which reasoning can fully consume, returning empty content).
+                # setdefault keeps the extended-thinking limit authoritative.
+                try:
+                    max_output_tokens = int(get_settings().config.get("max_output_tokens", 0))
+                except (TypeError, ValueError):
+                    max_output_tokens = 0
+                if max_output_tokens > 0:
+                    kwargs.setdefault("max_tokens", max_output_tokens)
 
                 if get_settings().litellm.get("enable_callbacks", False):
                     kwargs = self.add_litellm_callbacks(kwargs)
