@@ -1252,8 +1252,12 @@ class GitLabProvider(GitProvider):
                 ref = getattr(self.mr, "target_branch", None) or project.default_branch
             contents = project.files.get(file_path=file_path, ref=ref).decode()
             return decode_if_bytes(contents)
-        except GitlabGetError:
-            return ""
+        except GitlabGetError as e:
+            # A missing optional file is expected, but transient/provider failures must reach
+            # repo_context so the failed result is not cached as a successful empty context.
+            if getattr(e, "response_code", None) == 404:
+                return ""
+            raise
 
     def get_workspace_name(self):
         return self.id_project.split('/')[0]
@@ -1310,6 +1314,18 @@ class GitLabProvider(GitProvider):
         parsed_url = urlparse(merge_request_url)
 
         path_parts = parsed_url.path.strip('/').split('/')
+
+        # Strip the deployment sub-path prefix (e.g. '/gitlab') from the URL path
+        # so projects hosted on a GitLab instance using a relative URL parse correctly.
+        # Only strip when the URL points at the configured GitLab host, so a prefix
+        # from another host is never rewritten into a project on this instance.
+        gitlab_base = urlparse(self.gitlab_url)
+        base_path_parts = [part for part in gitlab_base.path.split("/") if part]
+        same_host = (parsed_url.scheme.lower() == gitlab_base.scheme.lower()
+                     and parsed_url.netloc.lower() == gitlab_base.netloc.lower())
+        if same_host and base_path_parts and path_parts[:len(base_path_parts)] == base_path_parts:
+            path_parts = path_parts[len(base_path_parts):]
+
         if 'merge_requests' not in path_parts:
             raise ValueError("The provided URL does not appear to be a GitLab merge request URL")
 
