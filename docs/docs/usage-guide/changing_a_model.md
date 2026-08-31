@@ -523,6 +523,21 @@ key = "..." # your openrouter api key
 
 (you can obtain an Openrouter API key from [here](https://openrouter.ai/settings/keys))
 
+OpenRouter's router models can be selected directly without setting `custom_model_max_tokens`:
+
+```toml
+[config]
+model = "openrouter/auto"
+fallback_models = ["openrouter/free"]
+```
+
+PR-Agent also registers `openrouter/fusion` and `openrouter/pareto-code`. Provider routing, reasoning, and output-cap
+settings are optional for all four router models; omit them to use OpenRouter's defaults. See OpenRouter's documentation
+for the [Auto](https://openrouter.ai/docs/guides/routing/routers/auto-router),
+[Free](https://openrouter.ai/docs/guides/routing/routers/free-router),
+[Fusion](https://openrouter.ai/docs/guides/routing/routers/fusion-router), and
+[Pareto](https://openrouter.ai/docs/guides/routing/routers/pareto-router) routers.
+
 #### Openrouter provider routing, reasoning and output cap
 
 For `openrouter/...` models you can optionally restrict which upstream providers Openrouter uses, control reasoning, and cap the completion length. All keys live in the `[openrouter]` section of `configuration.toml`. Models listed in [`SUPPORT_REASONING_EFFORT_MODELS`](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/algo/__init__.py) inherit `config.reasoning_effort` unless an Openrouter-specific effort or token budget is set.
@@ -659,8 +674,11 @@ built-in defaults.
 !!! note "Only models that accept a thinking budget are supported"
     PR-Agent enables extended thinking through the manual
     `thinking={"type": "enabled", "budget_tokens": ...}` request. Adaptive-only Claude models
-    (e.g. Opus 4.7/4.8, Sonnet 5, Fable 5) reject `budget_tokens` and will error if you add them to
-    the list — they are intentionally excluded from the built-in defaults.
+    (e.g. Opus 4.7/4.8, Opus 5, Sonnet 5, Fable 5) reject `budget_tokens`, so they are
+    intentionally excluded from the built-in defaults. If you add one to
+    `claude_extended_thinking_models_override` anyway, PR-Agent skips the extended-thinking payload
+    for it and logs a warning rather than sending a request the provider would reject — use
+    `enable_claude_adaptive_thinking` for those models instead.
 
 ## Output token limit
 
