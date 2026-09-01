@@ -29,7 +29,7 @@ from pr_agent.algo.git_patch_processing import extract_hunk_headers, extract_hun
 from pr_agent.algo.run_details import get_run_details
 from pr_agent.algo.token_handler import TokenEncoder
 from pr_agent.algo.types import FilePatchInfo
-from pr_agent.config_loader import get_settings, global_settings
+from pr_agent.config_loader import get_settings, get_verbosity_level, global_settings
 from pr_agent.log import get_logger
 
 
@@ -271,6 +271,9 @@ def convert_to_markdown_v2(output_data: dict,
         "Estimated effort to review [1-5]": "⏱️",
         "Contribution time cost estimate": "⏳",
         "Ticket compliance check": "🎫",
+        "Risk level": "⚠️",
+        "Merge recommendation": "✅",
+        "Review priority files": "📂",
     }
     markdown_text = ""
     markdown_text += f"{format_pr_review_header(incremental=bool(incremental_review))}\n\n"
@@ -288,7 +291,7 @@ def convert_to_markdown_v2(output_data: dict,
     review_data = {k: v for k, v in output_data["review"].items() if k != "todo_summary"}
     for key, value in review_data.items():
         if value is None or value == '' or value == {} or value == []:
-            if key.lower() not in ['can_be_split', 'key_issues_to_review']:
+            if key.lower() not in ['can_be_split', 'key_issues_to_review', 'review_priority_files']:
                 continue
         key_nice = key.replace('_', ' ').capitalize()
         emoji = emojis.get(key_nice, "")
@@ -365,6 +368,47 @@ def convert_to_markdown_v2(output_data: dict,
                     markdown_text += f"### {emoji} Security concerns\n\n"
                     value = emphasize_header(value.strip(), only_markdown=True)
                     markdown_text += f"{value}\n\n"
+        elif 'risk level' in key_nice.lower():
+            risk_value = str(value).strip().lower().replace("_", " ")
+            risk_display = risk_value.capitalize() if risk_value else "Unknown"
+            if gfm_supported:
+                markdown_text += "<tr><td>"
+                markdown_text += f"{emoji}&nbsp;<strong>Risk level</strong>: {risk_display}"
+                markdown_text += "</td></tr>\n"
+            else:
+                markdown_text += f"### {emoji} Risk level: {risk_display}\n\n"
+        elif 'merge recommendation' in key_nice.lower():
+            recommendation = str(value).strip().replace("_", " ")
+            recommendation_display = recommendation.capitalize() if recommendation else "Unknown"
+            if gfm_supported:
+                markdown_text += "<tr><td>"
+                markdown_text += f"{emoji}&nbsp;<strong>Merge recommendation</strong>: {recommendation_display}"
+                markdown_text += "</td></tr>\n"
+            else:
+                markdown_text += f"### {emoji} Merge recommendation: {recommendation_display}\n\n"
+        elif 'review priority files' in key_nice.lower():
+            priority_files = []
+            if isinstance(value, list):
+                priority_files = [str(priority_file).strip() for priority_file in value if str(priority_file).strip()]
+            if gfm_supported:
+                markdown_text += "<tr><td>"
+                if not priority_files:
+                    markdown_text += f"{emoji}&nbsp;<strong>Priority files</strong>: None"
+                else:
+                    markdown_text += f"{emoji}&nbsp;<strong>Priority files</strong>\n<br><br>\n"
+                    markdown_text += "<ul>\n"
+                    for priority_file in priority_files:
+                        markdown_text += f"<li>{priority_file}</li>\n"
+                    markdown_text += "</ul>\n"
+                markdown_text += "</td></tr>\n"
+            else:
+                if not priority_files:
+                    markdown_text += f"### {emoji} Priority files: None\n\n"
+                else:
+                    markdown_text += f"### {emoji} Priority files\n\n"
+                    for priority_file in priority_files:
+                        markdown_text += f"- {priority_file}\n"
+                    markdown_text += "\n"
         elif 'todo sections' in key_nice.lower():
             if gfm_supported:
                 markdown_text += "<tr><td>"
@@ -827,7 +871,7 @@ def load_large_diff(filename, new_file_content_str: str, original_file_content_s
         new_file_content_str = (new_file_content_str or "").rstrip() + "\n"
         diff = difflib.unified_diff(original_file_content_str.splitlines(keepends=True),
                                     new_file_content_str.splitlines(keepends=True))
-        if get_settings().config.verbosity_level >= 2 and show_warning:
+        if get_verbosity_level() >= 2 and show_warning:
             get_logger().info(f"File was modified, but no patch was found. Manually creating patch: {filename}.")
         patch = ''.join(diff)
         return patch
@@ -940,6 +984,8 @@ def load_yaml(response_text: str, keys_fix_yaml: List[str] = [], first_key="", l
         else:
             get_logger().info("Successfully parsed AI prediction after fallbacks",
                               artifact={'response_text': response_text})
+    if data is None:
+        return {}
     return data
 
 
@@ -1421,18 +1467,26 @@ def find_line_number_of_relevant_line_in_file(diff_files: List[FilePatchInfo],
                     relevant_line_in_file = matches_difflib[0]
 
 
-                for i, line in enumerate(patch_lines):
-                    if line.startswith('@@'):
-                        delta = 0
-                        match = re_hunk_header.match(line)
-                        section_header, size1, size2, start1, start2 = extract_hunk_headers(match)
-                    elif not line.startswith('-'):
-                        delta += 1
+                def scan_patch_lines(is_match):
+                    scan_delta = 0
+                    scan_start2 = 0
+                    for i, line in enumerate(patch_lines):
+                        if line.startswith('@@'):
+                            scan_delta = 0
+                            header_match = re_hunk_header.match(line)
+                            *_, scan_start2 = extract_hunk_headers(header_match)
+                        elif not line.startswith('-'):
+                            scan_delta += 1
 
-                    if relevant_line_in_file in line and line[0] != '-':
-                        position = i
-                        absolute_position = start2 + delta - 1
-                        break
+                        if not line.startswith('-') and is_match(line):
+                            return i, scan_start2 + scan_delta - 1
+                    return -1, absolute_position
+
+                position, absolute_position = scan_patch_lines(
+                    lambda line: line == relevant_line_in_file or line[1:] == relevant_line_in_file)
+                if position == -1:
+                    position, absolute_position = scan_patch_lines(
+                        lambda line: relevant_line_in_file in line)
 
                 if position == -1 and relevant_line_in_file[0] == '+':
                     no_plus_line = relevant_line_in_file[1:].lstrip()
