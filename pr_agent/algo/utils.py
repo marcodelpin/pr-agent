@@ -12,11 +12,12 @@ import sys
 import textwrap
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Iterable, List, Tuple, TypedDict
+from urllib.parse import urlparse
 
 import html2text
 import requests
@@ -1282,9 +1283,11 @@ def get_max_tokens(model):
     Get the maximum number of tokens allowed for a model.
     logic:
     (1) If the model is in './pr_agent/algo/__init__.py', use the value from there.
-    (2) else, the user needs to define explicitly 'config.custom_model_max_tokens'
+    (2) else if 'config.custom_model_max_tokens' is set to a positive value, use it.
+    (3) else, fall back to litellm.get_model_info(model)["max_input_tokens"].
+    (4) else, raise an error.
 
-    For both cases, we further limit the number of tokens to 'config.max_model_tokens' if it is set.
+    For all cases, we further limit the number of tokens to 'config.max_model_tokens' if it is set.
     This aims to improve the algorithmic quality, as the AI model degrades in performance when the input is too long.
     """
     settings = get_settings()
@@ -1294,8 +1297,29 @@ def get_max_tokens(model):
     elif custom_max_tokens > 0:
         max_tokens_model = custom_max_tokens
     else:
-        get_logger().error(f"Model {model} is not defined in MAX_TOKENS in ./pr_agent/algo/__init__.py and no custom_model_max_tokens is set")
-        raise Exception(f"Ensure {model} is defined in MAX_TOKENS in ./pr_agent/algo/__init__.py or set a positive value for it in config.custom_model_max_tokens")
+        # Fallback: ask LiteLLM for the model's metadata before giving up.
+        max_tokens_model = 0
+        import litellm
+        try:
+            model_info = litellm.get_model_info(model)
+        except Exception:
+            get_logger().debug(f"litellm.get_model_info could not resolve model '{model}'")
+            model_info = None
+        if model_info:
+            litellm_max = model_info.get("max_input_tokens")
+            if litellm_max and int(litellm_max) > 0:
+                max_tokens_model = int(litellm_max)
+                get_logger().debug(f"Resolved max_input_tokens for '{model}' from litellm: {max_tokens_model}")
+
+        if max_tokens_model <= 0:
+            get_logger().error(
+                f"Model {model} is not defined in MAX_TOKENS in ./pr_agent/algo/__init__.py"
+                f" and no custom_model_max_tokens is set"
+            )
+            raise Exception(
+                f"Ensure {model} is defined in MAX_TOKENS in ./pr_agent/algo/__init__.py"
+                f" or set a positive value for it in config.custom_model_max_tokens"
+            )
 
     max_model_tokens = _as_int(settings.config.max_model_tokens) if settings.config.max_model_tokens else 0
     if max_model_tokens > 0:
@@ -1579,6 +1603,77 @@ def github_action_output(output_data: dict, key_name: str):
     except Exception as e:
         get_logger().error(f"Failed to write to GitHub Action output: {e}")
     return
+
+
+def _push_outputs_sink_url(cfg: dict, key: str) -> str:
+    """Return cfg[key] if it is an absolute https URL with a host, else "" (with a warning).
+
+    Requiring https keeps the review text, which can quote private code, off plaintext
+    transports. The host is not restricted: self-hosted collectors and Slack-compatible
+    endpoints (Mattermost, Rocket.Chat) are legitimate targets.
+    """
+    url = cfg.get(key) or ''
+    if not url:
+        return ''
+    parsed = urlparse(url)
+    if parsed.scheme != 'https' or not parsed.hostname:
+        # Log the key, never the value: a webhook URL is itself the credential.
+        get_logger().warning(f"push_outputs: ignoring {key}, expected an absolute https:// URL")
+        return ''
+    return url
+
+
+def push_outputs(message_type: str, payload: dict | None = None, markdown: str | None = None) -> None:
+    """Emit a tool's output to external sinks, without calling any git-provider API.
+
+    Controlled by the [push_outputs] config section (disabled by default). Supported channels:
+    "stdout" (one JSON line), "file" (append JSONL), "webhook" (POST the generic record),
+    "slack" (POST {"text": ...} to a Slack Incoming Webhook). Non-fatal: never raises.
+    """
+    try:
+        cfg = get_settings().get('push_outputs', {}) or {}
+        enable = cfg.get('enable', False)
+        if isinstance(enable, str):  # env vars arrive as strings; treat "false"/"0"/"no"/"" as off
+            enable = enable.lower().strip() not in ("false", "0", "no", "")
+        if not enable:
+            return
+
+        channels = cfg.get('channels', []) or []
+        record = {
+            "type": message_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": payload or {},
+        }
+        if markdown is not None:
+            record["markdown"] = markdown
+
+        if "stdout" in channels:
+            print(json.dumps(record, ensure_ascii=False))
+
+        if "file" in channels:
+            file_path = cfg.get('file_path', 'pr-agent-outputs/reviews.jsonl')
+            folder = os.path.dirname(file_path)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+            with open(file_path, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        # Local channels first, network last, so a failed POST can't lose a file write.
+        # allow_redirects=False: never follow a redirect from a configured sink to another host.
+        if "webhook" in channels:
+            webhook_url = _push_outputs_sink_url(cfg, 'webhook_url')
+            if webhook_url:
+                requests.post(webhook_url, json=record, timeout=5, allow_redirects=False)
+
+        # Slack Incoming Webhooks accept {"text": ...} directly, no relay service needed.
+        if "slack" in channels:
+            slack_webhook_url = _push_outputs_sink_url(cfg, 'slack_webhook_url')
+            if slack_webhook_url:
+                text = markdown if markdown is not None else json.dumps(payload or {}, ensure_ascii=False)
+                requests.post(slack_webhook_url, json={"text": text}, timeout=5, allow_redirects=False)
+    except Exception as e:
+        # Log only the exception type: requests errors embed the (secret-bearing) URL in their text.
+        get_logger().warning(f"push_outputs failed: {type(e).__name__}")
 
 
 def _render_setting_value(value) -> str:
