@@ -25,6 +25,8 @@ extra_config_url="" # optional URL or path to an additional .pr_agent.toml merge
 disable_auto_feedback = false
 enable_auto_approval = false # when true, /review may auto-approve a PR via auto_approve_logic(); that caller is currently commented out
 ai_timeout=120 # 2 minutes
+retry_same_model_on_timeout = true # when false, a timed-out call is not retried on the same model and moves on to fallback_models
+# num_retries = 0 # per-call retries inside the completion client itself; unset keeps the client's default. These multiply the handler's own retry attempts
 skip_keys = []
 custom_reasoning_model = false # when true, disables system messages and temperature controls for models that don't support chat-style inputs
 response_language="en-US" # Language locales code for PR responses in ISO 3166 and ISO 639 format (e.g., "en-US", "it-IT", "zh-CN", ...)
@@ -51,7 +53,7 @@ output_run_details=false # if true, append an agent run details section (model, 
 output_run_cost=false # if true, collect estimated LiteLLM API cost and include it inside the enabled run details section
 large_patch_policy = "clip" # "clip", "skip"
 duplicate_prompt_examples = false
-# Persistent inline comments (issue #2037): when true, the GitHub and GitLab providers
+# Persistent inline comments (issue #2037): when true, the GitHub, GitLab, and Azure DevOps providers
 # fingerprint each inline comment, embed the fingerprint as an HTML marker, and skip
 # re-posting suggestions already present on the PR/MR across runs.
 persistent_inline_comments = false
@@ -489,7 +491,8 @@ uri = "./lancedb"
 
 [skills]
 # Agent skills (SKILL.md) support: discovers SKILL.md files from the configured
-# filesystem paths and injects their content into review/improve/describe prompts.
+# filesystem paths and injects their content into review/improve/describe and
+# top-level /ask prompts.
 # Sibling *.md files in the skill directory tree (e.g. references/guide.md) are
 # inlined alongside SKILL.md. PR-Agent supports text-only skills: scripts/ and
 # assets/ subdirectories are skipped because PR-Agent uses a single-shot model
@@ -534,6 +537,7 @@ request_timeout = 10 # seconds allowed for each Asana task API request
 default_comment_status = "closed"
 
 [azure_devops_server]
+agent_identity = "" # empty: discover the identity from earlier agent comments on the PR
 pr_commands = [
     "/describe",
     "/review",
