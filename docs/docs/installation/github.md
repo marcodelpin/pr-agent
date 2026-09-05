@@ -659,6 +659,7 @@ Allowing you to automate the review process on your private or public repositori
    - Set the following events:
      - Issue comment
      - Pull request
+     - Pull request review
      - Push (if you need to enable triggering on PR update)
      - Pull request review comment (required for `/ask` on review threads)
 
@@ -699,9 +700,8 @@ cp pr_agent/settings/.secrets_template.toml pr_agent/settings/.secrets.toml
 - Copy your app's webhook secret to the webhook_secret field (required).
 - Set deployment_type to 'app' in [configuration.toml](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/settings/configuration.toml)
 
-    > The .secrets.toml file is not copied to the Docker image by default, and is only used for local development.
-    > If you want to use the .secrets.toml file in your Docker image, you can add remove it from the .dockerignore file.
-    > In most production environments, you would inject the secrets file as environment variables or as mounted volumes.
+    > The local `.secrets.toml` file is excluded from the Docker build context. Never bake secrets into a container image.
+    > For container deployments, provide secrets at runtime through environment variables or a mounted secret volume.
     > For example, in order to inject a secrets file as a volume in a Kubernetes environment you can update your pod spec to include the following,
     > assuming you have a secret named `pr-agent-settings` with a key named `.secrets.toml`:
 
