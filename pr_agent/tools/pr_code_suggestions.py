@@ -380,9 +380,10 @@ class PRCodeSuggestions:
             if get_settings().config.publish_output:
                 if self.progress_response:
                     self.git_provider.remove_comment(self.progress_response)
-                elif not self._output_published:
+                if not self._output_published:
                     try:
-                        self.git_provider.remove_initial_comment()
+                        if not self.progress_response:
+                            self.git_provider.remove_initial_comment()
                         self.git_provider.publish_comment("Failed to generate code suggestions for PR")
                     except Exception as e:
                         get_logger().exception(f"Failed to update persistent review, error: {e}")
@@ -1104,12 +1105,15 @@ class PRCodeSuggestions:
                 get_logger().info("Failed to publish code suggestions, trying to publish each suggestion separately")
                 for code_suggestion in code_suggestions:
                     if self.git_provider.publish_code_suggestions([code_suggestion]):
+                        is_successful = True
                         self._output_published = True
         if coverage_footer and not supports_suggestions_artifact:
             fallback_comments.append(coverage_footer.strip())
         if fallback_comments:
             self.git_provider.publish_comment("\n\n---\n\n".join(fallback_comments))
             self._output_published = True
+        if code_suggestions and not is_successful:
+            raise RuntimeError("Failed to publish code suggestions after individual retries")
         return
 
     def _get_diff_file(self, relevant_file):
