@@ -67,8 +67,9 @@ def normalize_finding(finding: Mapping[str, Any]) -> dict[str, Any] | None:
     if not path or not body:
         return None
 
-    body = _WHITESPACE_RE.sub(" ", body)
-    finding_id = key_issue_fingerprint(path, body.lower())
+    # The fingerprint ignores whitespace so re-wrapped prose stays the same finding, but the
+    # body is what the resolved section renders, so it keeps the line breaks the reviewer used.
+    finding_id = key_issue_fingerprint(path, _WHITESPACE_RE.sub(" ", body).lower())
     start = _as_line(
         finding.get("line_start")
         or finding.get("relevant_lines_start")
@@ -159,6 +160,10 @@ def serialize_review_state(state: Mapping[str, Any]) -> str:
     if not _is_valid_state(state):
         raise ValueError("Invalid review finding state")
     payload = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    # An HTML comment ends at the first "-->" or "--!>", and a finding quotes whatever the
+    # diff contains. Escaping the ">" keeps the marker one comment; json.loads decodes the
+    # escape, so the finding round-trips unchanged.
+    payload = payload.replace("-->", "--\\u003e").replace("--!>", "--!\\u003e")
     return f"<!-- pr-agent-review-state:v{STATE_SCHEMA_VERSION}\n{payload}\n-->"
 
 

@@ -60,6 +60,81 @@ from pr_agent.tools.ticket_pr_compliance_check import (
 MAX_REVIEW_COVERAGE_FILES = 50
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
 
+_REVIEW_FAILURE_REASONS = (
+    (
+        ("credit balance is too low", "insufficient credits", "insufficient balance", "insufficient_quota"),
+        "The model provider rejected the request because the API account has insufficient credits. "
+        "Add credits, then retry the command.",
+    ),
+    (
+        ("authenticationerror", "authentication error", "invalid api key", "invalid x-api-key"),
+        "PR-Agent could not authenticate with the model provider. Check the configured API credentials, then retry.",
+    ),
+    (
+        ("ratelimiterror", "rate limit", "too many requests"),
+        "The model provider rate-limited the request. Wait for the limit to reset, then retry.",
+    ),
+    (
+        ("apitimeouterror", "timeout error", "timed out"),
+        "The model provider timed out before completing the review. Retry the command or adjust the provider timeout.",
+    ),
+    (
+        ("context_length_exceeded", "maximum context length", "input is too long", "too many tokens"),
+        "The pull request exceeded the selected model's context limit. Retry with a larger-context model or an "
+        "incremental review.",
+    ),
+    (
+        ("apiconnectionerror", "connection error"),
+        "PR-Agent could not reach the model provider. Check provider availability and network access, then retry.",
+    ),
+    (
+        ("failed to generate prediction with any model",),
+        "Every configured model attempt failed. Check the PR-Agent service logs for the provider error, then retry.",
+    ),
+)
+_UNKNOWN_REVIEW_FAILURE_REASON = (
+    "PR-Agent encountered an unexpected internal error. Check the PR-Agent service logs for details."
+)
+
+
+def _exception_chain_text(error: Exception) -> str:
+    """Return exception types and messages for classification without publishing them."""
+    parts = []
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen and len(parts) < 8:
+        seen.add(id(current))
+        try:
+            message = str(current)
+        except Exception:
+            message = ""
+        parts.append(f"{type(current).__name__}: {message}")
+        current = current.__cause__ or current.__context__
+    return "\n".join(parts).casefold()
+
+
+def _as_bool(value) -> bool:
+    """Interpret configured boolean values without treating non-empty strings as true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in ("1", "true", "yes", "on")
+    return False
+
+
+def _review_failure_comment(error: Exception) -> str:
+    """Build an optional deterministic failure explanation from an allowlist of safe messages."""
+    if not _as_bool(get_settings().pr_reviewer.get("publish_error_details", False)):
+        return "Failed to review PR"
+
+    error_text = _exception_chain_text(error)
+    reason = _UNKNOWN_REVIEW_FAILURE_REASON
+    for patterns, candidate in _REVIEW_FAILURE_REASONS:
+        if any(pattern in error_text for pattern in patterns):
+            reason = candidate
+            break
+    return f"Failed to review PR\n\n**Reason:** {reason}"
+
 
 _STATE_BLOCK_INVALID_MARKER = "invalid_marker"
 _STATE_BLOCK_READ_ERROR = "read_error"
@@ -182,6 +257,7 @@ class PRReviewer:
     async def run(self) -> None:
         init_run_details()
         progress_response = None
+        review_error = None
         review_failed = False
         persistent_write_failed = False
         try:
@@ -226,7 +302,8 @@ class PRReviewer:
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 progress_response = self.git_provider.publish_comment("Preparing review...", is_temporary=True)
 
-            await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
+            await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR,
+                                             git_provider=self.git_provider)
             if not self.prediction:
                 return None
 
@@ -328,6 +405,11 @@ class PRReviewer:
                     persistent_write_failed = not self._persistent_publish_succeeded(result)
                     if persistent_write_failed:
                         review_failed = True
+                elif self._persistent_review_comment_exists() is False:
+                    # There is no review comment to replace, so creating one cannot overwrite
+                    # a comment PR-Agent did not author. An identity this deployment cannot
+                    # resolve is not a reason to demote the canonical review.
+                    self.git_provider.publish_persistent_comment(pr_review, **persistent_args)
                 else:
                     # An unverified provider identity must never update a canonical review.
                     self.git_provider.publish_comment(
@@ -345,6 +427,7 @@ class PRReviewer:
                     pr_review = add_pr_review_identity(pr_review, identity_marker)
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
         except Exception as e:
+            review_error = e
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
             if get_settings().config.get("propagate_tool_errors", False):
@@ -364,7 +447,7 @@ class PRReviewer:
                 )
             ):
                 try:
-                    self.git_provider.publish_comment("Failed to review PR")
+                    self.git_provider.publish_comment(_review_failure_comment(review_error))
                 except Exception as e:
                     get_logger().exception(f"Failed to publish review failure result, error: {e}")
 
@@ -450,6 +533,27 @@ class PRReviewer:
             callable(capability)
             and implementation is not GitProvider.supports_review_finding_state
         )
+
+    def _persistent_review_comment_exists(self) -> Optional[bool]:
+        """Whether a comment already carries the full-review identity.
+
+        Returns None when the provider's comments could not be read at all, so a caller
+        that must not overwrite an existing review can stay conservative.
+        """
+        provider = getattr(self, "git_provider", None)
+        if provider is None:
+            return None
+        try:
+            for _comment, _body in GitProvider._iter_persistent_comments(
+                provider,
+                get_pr_review_comment_identifiers(full=True, incremental=False),
+                identity_marker=PRReviewIdentity.REGULAR.value,
+            ):
+                return True
+            return False
+        except Exception as error:
+            get_logger().warning(f"Could not read the existing review comments: {error}")
+            return None
 
     def _review_comment_authorship_available(self) -> bool:
         provider = getattr(self, "git_provider", None)
@@ -541,7 +645,12 @@ class PRReviewer:
         for issue in issues:
             finding = cls._review_finding_from_issue(issue)
             if finding is None:
-                return None
+                # A key issue without a file or a body cannot be tracked across runs, but the
+                # review summary still renders it; dropping the entry keeps the lifecycle state
+                # of every other finding instead of discarding the whole review.
+                get_logger().debug("Skipping a key issue that carries no trackable location",
+                                   artifact={"issue": issue})
+                continue
             findings.append(finding)
         return findings
 
@@ -614,12 +723,19 @@ class PRReviewer:
             max_findings = int(get_settings().pr_reviewer.num_max_findings)
         except (TypeError, ValueError):
             max_findings = 0
+        reported_issues = data["review"].get("key_issues_to_review")
+        dropped_findings = (
+            isinstance(reported_issues, list)
+            and len(current_findings) < len(reported_issues)
+        )
         allow_resolution = (
             bool(self.prediction)
             and not bool(getattr(self.incremental, "is_incremental", False))
             and not bool(self.remaining_files_list)
             and parsed.valid
             and current_findings is not None
+            # a dropped finding is not an absent one, so this run cannot resolve anything
+            and not dropped_findings
             and len(current_findings) < max_findings
         )
         result = reconcile_review_findings(

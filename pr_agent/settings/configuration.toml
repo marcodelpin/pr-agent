@@ -38,7 +38,8 @@ max_description_tokens = 500
 max_commits_tokens = 500
 max_model_tokens = 32000 # Limits the maximum number of tokens that can be used by any model, regardless of the model's default capabilities.
 custom_model_max_tokens=-1 # for models not in the default list
-max_output_tokens = 0 # Output token limit sent as max_tokens on model calls; 0 = unset (the provider's own default applies)
+# Sent as max_completion_tokens for GPT-6 Astra, otherwise max_tokens; use a limit supported by the model.
+max_output_tokens = 0 # 0 = unset (the provider's own default applies)
 model_token_count_estimate_factor=0.3 # factor to increase the token count estimate, in order to reduce likelihood of model failure due to too many tokens - applicable only when requesting an accurate estimate.
 # patch extension logic
 patch_extension_skip_types =[".md",".txt"]
@@ -66,6 +67,13 @@ ignore_pr_target_branches = [] # a list of regular expressions of target branche
 ignore_pr_source_branches = [] # a list of regular expressions of source branches to ignore from PR agent when an PR is created
 ignore_pr_labels = [] # labels to ignore from PR agent when an PR is created
 ignore_pr_authors = [] # authors to ignore from PR agent when an PR is created
+# Reactions added to the comment that triggered a command. Names are provider-specific:
+# GitHub accepts only +1, -1, laugh, confused, heart, hooray, rocket, eyes; GitLab and Gitea
+# take any award-emoji name. An empty value disables that reaction. When an outcome reaction
+# is configured it replaces the start reaction rather than joining it.
+reaction_on_start = "eyes"   # added before the command runs
+reaction_on_success = ""     # added when the command finished successfully
+reaction_on_failure = ""     # added when the command failed
 ignore_repositories = [] # a list of regular expressions of repository full names (e.g. "org/repo") to ignore from PR agent processing
 ignore_language_framework = [] # a list of code-generation languages or frameworks (e.g. 'protobuf', 'go_gen') whose auto-generated source files will be excluded from analysis
 # Substring indicators used to skip bot users on webhook events. Currently consumed by
@@ -120,6 +128,7 @@ require_merge_recommendation=false # ask the model for a merge recommendation (s
 require_priority_files=false # ask the model which files a human should inspect first
 # general options
 publish_output_no_suggestions=true # Set to "false" if you only need the reviewer's remarks (not labels, not "security audit", etc.) and want to avoid noisy "No major issues detected" comments.
+publish_error_details=false # Publish a deterministic, sanitized failure reason in manual review comments. No AI call is used.
 persistent_comment=true
 # Visible base heading for full and incremental review comments. Identity is tracked separately.
 review_heading = "PR Reviewer Guide"
@@ -281,6 +290,7 @@ enable_help_text=false
 # The type of deployment to create. Valid values are 'app' or 'user'.
 deployment_type = "user"
 ratelimit_retries = 5
+polling_request_timeout = 10 # total seconds for comment-history fallback; positive values capped at 60
 base_url = "https://api.github.com"
 publish_inline_comments_fallback_with_verification = true
 try_fix_invalid_inline_comments = true
@@ -438,6 +448,16 @@ reasoning_effort = ""
 # Some providers require max_tokens to be greater than the reasoning budget.
 reasoning_max_tokens = 0
 max_tokens = 0 # hard cap on completion tokens for the request; 0 = unset
+
+[model_routing] # send a small pull request to a cheaper primary model (disabled by default)
+# Rules are checked in order; the first one whose limits the pull request fits selects the primary model for the
+# call, and config.fallback_models still apply after it. A pull request that fits no rule uses config.model.
+# Size is measured after the [ignore] rules by diff hunks (max_hunks) and changed files (max_files), which every
+# git provider reports and which do not depend on any model's tokenizer. Only calls that ask for the regular model
+# are routed (/review, /improve, /generate_labels, /add_docs); tools that use model_weak are left alone.
+# With Azure (openai.deployment_id set) a rule also needs its own deployment_id, or it is skipped.
+enable = false
+rules = [] # e.g. [{ max_hunks = 3, model = "gpt-5.6-luna" }, { max_hunks = 15, max_files = 6, model = "gpt-5.6-terra" }]
 
 [otel]
 # Keys map to settings.get("OTEL.*") via section-key dot notation.

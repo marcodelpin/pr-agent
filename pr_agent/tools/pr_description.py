@@ -28,6 +28,7 @@ from pr_agent.algo.utils import (
     get_max_tokens,
     get_user_labels,
     load_yaml,
+    push_outputs,
     set_custom_labels,
     show_relevant_configurations,
     show_run_details,
@@ -177,6 +178,9 @@ class PRDescription:
                 pr_body += show_run_details(self.git_provider.is_supported("gfm_markdown"))
 
             if get_settings().config.publish_output:
+                # Emit to the optional external sinks before touching the provider, so a sink
+                # still receives the description if publishing it to the PR fails.
+                push_outputs("describe", payload=self.data or {}, markdown=pr_body)
 
                 # publish labels
                 if get_settings().pr_description.publish_labels and pr_labels and self.git_provider.is_supported("get_labels"):
@@ -210,7 +214,16 @@ class PRDescription:
                     # anywhere in the body without depending on visible section
                     # headers that a human might quote.
                     pr_body = '<!-- pr-agent-generated -->\n' + pr_body
-                    self.git_provider.publish_description(title_to_publish, pr_body)
+                    try:
+                        self.git_provider.publish_description(title_to_publish, pr_body)
+                    except Exception:
+                        try:
+                            self.git_provider.publish_comment("Failed to update PR description")
+                        except Exception as publication_error:
+                            get_logger().exception(
+                                f"Failed to publish PR description failure result, error: {publication_error}"
+                            )
+                        raise
 
                     # publish final update message
                     if (get_settings().pr_description.final_update_message and not get_settings().config.get('is_auto_command', False)):
