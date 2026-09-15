@@ -436,6 +436,41 @@ To bound how much of this context is sent to the model, `repo_context_max_lines`
 repo_context_max_lines = 500
 ```
 
+### Context from sibling repositories
+
+The host operator must first approve repositories in the deployment configuration:
+
+```toml
+[config]
+repo_context_sibling_repos = ["my-group/library"]
+repo_context_max_sibling_files = 5
+```
+
+Approve only repositories whose contents may appear in reviews of consuming repositories.
+This allowlist and the fetch limit cannot be changed by repository settings or comment arguments.
+An empty allowlist disables sibling reads.
+
+A consuming repository can then select files in its `.pr_agent.toml` as structured
+`repo_context_files` entries:
+
+```toml
+[config]
+repo_context_files = [
+    "AGENTS.md",
+    {repo_id = "my-group/library", file_path = "src/api.py"},
+]
+```
+
+Use `owner/repository` on GitHub or a full project path on GitLab. GitLab also accepts numeric
+project IDs as strings, provided the same identifier is in the host allowlist. Resolved repositories
+must share the current repository's owning namespace: the GitHub owner or GitLab top-level group,
+including projects in different subgroups. Renamed or redirected paths must be updated to their
+canonical names in both settings.
+
+Sibling files always come from their default branch and share `repo_context_max_lines` with local
+files. Private and internal repositories also require requester access. Comment arguments cannot
+override `repo_context_files` at all; a repository's `.pr_agent.toml` may still set it.
+
 ## Ignoring automatic commands in PRs
 
 PR-Agent allows you to automatically ignore certain PRs based on various criteria:
@@ -540,19 +575,6 @@ ignore_language_framework = ['protobuf', ...]
 
 You can view the list of auto-generated file patterns in [`generated_code_ignore.toml`](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/settings/generated_code_ignore.toml).
 Files matching these glob patterns will be automatically excluded from PR Agent analysis.
-
-### Ignoring Tickets with Specific Labels
-
-When PR-Agent analyzes tickets (JIRA, GitHub Issues, GitLab Issues, etc.) referenced in your PR, you may want to exclude tickets that have certain labels from the analysis. This is useful for filtering out tickets marked as "ignore-compliance", "skip-review", or other labels that indicate the ticket should not be considered during PR review.
-
-To ignore tickets with specific labels, add the following to your `configuration.toml` file:
-
-```toml
-[config]
-ignore_ticket_labels = ["ignore-compliance", "skip-review", "wont-fix"]
-```
-
-Where `ignore_ticket_labels` is a list of label names that should be ignored during ticket analysis.
 
 ### Restricted Mode
 

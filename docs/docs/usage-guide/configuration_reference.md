@@ -45,6 +45,9 @@ to-do list.
 | --- | --- | --- |
 | `use_repo_settings_file` | true |  |
 | `use_global_settings_file` | true |  |
+| `enable_per_directory_settings` | false | when true, merge per-directory .pr_agent.toml files found by walking up from the PR's changed files (monorepo support). Adds bounded recursive tree discovery per MR; per-directory files may only override non-critical sections (see REPO_PER_DIRECTORY_OVERRIDABLE_SECTIONS). Nearest (deepest) directory wins on shared keys; equal-depth siblings resolve to the lexicographically-last path; when more files match than the per_directory_settings_max_files cap, shallower files are applied first and a partially capped depth keeps its later-path (winning) siblings; any overlap is logged as a warning. |
+| `per_directory_settings_max_files` | 20 | hard ceiling on the number of per-directory .pr_agent.toml files applied per MR (deeper configs beyond the cap are skipped with a warning) |
+| `per_directory_settings_max_tree_pages` | 10 | maximum GitLab recursive-tree pages (100 entries each); skip nested settings if discovery is incomplete. Root/host-controlled, independent of the settings-file cap. |
 | `extra_config_url` | "" | optional URL or path to an additional .pr_agent.toml merged before the repo-local config; also settable via --extra_config_url or PR_AGENT_EXTRA_CONFIG_URL. See docs/docs/usage-guide/configuration_options.md#external-configuration-url. |
 | `disable_auto_feedback` | false |  |
 | `enable_auto_approval` | false | when true, /review may auto-approve a PR via auto_approve_logic(); that caller is currently commented out |
@@ -53,9 +56,11 @@ to-do list.
 | `skip_keys` | [] |  |
 | `custom_reasoning_model` | false | when true, disables system messages and temperature controls for models that don't support chat-style inputs |
 | `response_language` | "en-US" | Language locales code for PR responses in ISO 3166 and ISO 639 format (e.g., "en-US", "it-IT", "zh-CN", ...) |
-| `repo_context_files` | ["AGENTS.md"] | Repository-relative files (e.g. AGENTS.md, CLAUDE.md) to include as AI prompt context; set to [] to disable |
+| `repo_context_files` | ["AGENTS.md"] | Repository-relative files (e.g. AGENTS.md, CLAUDE.md) to include as AI prompt context; set to [] to disable local context. A structured entry {"repo_id" = ..., "file_path" = ...} selects a sibling default-branch file from the same namespace/owner; repo_id must be in the host-issued repo_context_sibling_repos allowlist below. Reads use the sibling default branch and share repo_context_max_lines; repository settings may select entries, comment arguments cannot override this key |
 | `repo_context_from_default_branch` | true | Read repo context files from the repository default branch (trusts only default-branch content). Set to false to read from the PR target branch instead. |
 | `repo_context_max_lines` | 500 | Maximum total rendered lines for repo context, including wrapper tags |
+| `repo_context_sibling_repos` | [] | Host-only list of approved sibling repository identifiers (GitHub owner/repo, GitLab group/project or numeric ID strings) that repo_context_files sibling entries may select. Empty disables sibling reads. Approve only repositories whose content may be disclosed in consuming PRs, because the actor check bounds who triggers a read, not who chose the target or where the output lands. Repository settings and comment arguments cannot change this list. Canonical identities and owning namespaces are checked after resolution |
+| `repo_context_max_sibling_files` | 5 | Maximum number of sibling-repository files fetched per repo-context build. The fetch count is bounded separately from repo_context_max_lines so selected sibling files cannot trigger an unbounded number of cross-repository calls; sibling files still compete for the repo_context_max_lines budget. Host-only (cannot be raised by a repository's .pr_agent.toml or a comment command) and clamped to a hard ceiling of 20 fetches per build. |
 **token limits**
 
 | Key | Default | Description |
@@ -335,6 +340,7 @@ _This section only documents commented-out examples; see the [TOML source](https
 | `review_states` | ["changes_requested"] | A submitted GitHub review can optionally trigger these commands. The empty default preserves current behavior. |
 | `review_author_types` | ["User"] |  |
 | `review_commands` | [] |  |
+| `webhook_delivery_deduplication` | false | Opt in to in-memory deduplication by X-GitHub-Delivery within each worker process. Active work stays protected; completed IDs expire after the deployment's push_trigger_pending_tasks_ttl (read at startup, 300 seconds by default). Failed or cancelled work can retry immediately. Repeated deliveries do not extend the TTL. Manual redeliveries are also suppressed during this window. State is cleared on restart and is not shared across workers or replicas. |
 | `handle_push_trigger` | false | settings for "pull_request" event with "synchronize" action - used to detect and handle push triggers for new commits |
 | `push_trigger_ignore_bot_commits` | true |  |
 | `push_trigger_ignore_merge_commits` | true |  |
