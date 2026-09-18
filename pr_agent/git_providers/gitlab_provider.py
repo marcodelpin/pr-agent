@@ -5,7 +5,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import gitlab
 from gitlab import GitlabAuthenticationError, GitlabCreateError, GitlabGetError, GitlabUpdateError
@@ -517,10 +517,10 @@ class GitLabProvider(GitProvider):
                 get_logger().exception(f"Cannot get PR: {self.pr_url} default branch. Tried project ID: {self.id_project}")
                 return ("", "")
             # numeric-alias URLs need the "projects/" segment, same as get_line_link
-            prefix = f"{self._get_project_web_url()}/-/blob/{desired_branch}"
+            prefix = f"{self._get_project_web_url()}/-/blob/{quote(desired_branch)}"
         else: #Use repo git url
             repo_path = repo_git_url.split('.git')[0].split('.com/')[-1]
-            prefix = f"{self.gitlab_url}/{repo_path}/-/blob/{desired_branch}"
+            prefix = f"{self.gitlab_url}/{repo_path}/-/blob/{quote(desired_branch)}"
         suffix = "?ref_type=heads"  # gitlab cloud adds this suffix. gitlab server does not, but it is harmless.
         return (prefix, suffix)
 
@@ -534,7 +534,7 @@ class GitLabProvider(GitProvider):
         self.mr = self._get_merge_request()
         try:
             # the versions endpoint is ordered newest-first, so the latest diff is the first entry
-            self.last_diff = self.mr.diffs.list(get_all=True)[0]
+            self.last_diff = self.mr.diffs.list(page=1, per_page=1, get_all=False)[0]
         except IndexError as e:
             get_logger().error(f"Could not get diff for merge request {self.id_mr}")
             raise DiffNotFoundError(f"Could not get diff for merge request {self.id_mr}") from e
@@ -1279,7 +1279,7 @@ class GitLabProvider(GitProvider):
         if not changes:
             get_logger().error('No changes found for the merge request.')
             return None
-        all_diffs = self.mr.diffs.list(get_all=True)
+        all_diffs = self.mr.diffs.list(page=1, per_page=1, get_all=False)
         if not all_diffs:
             get_logger().error('No diffs found for the merge request.')
             return None
@@ -1926,15 +1926,15 @@ class GitLabProvider(GitProvider):
             relevant_line_start, relevant_line_end
         )
         if relevant_line_start == -1:
-            link = f"{project_web_url}/-/blob/{self.mr.source_branch}/{relevant_file}?ref_type=heads"
+            link = f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{relevant_file}?ref_type=heads"
         elif relevant_line_end:
             link = (
-                f"{project_web_url}/-/blob/{self.mr.source_branch}/{relevant_file}?ref_type=heads"
+                f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{relevant_file}?ref_type=heads"
                 f"#L{relevant_line_start}-{relevant_line_end}"
             )
         else:
             link = (
-                f"{project_web_url}/-/blob/{self.mr.source_branch}/{relevant_file}?ref_type=heads"
+                f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{relevant_file}?ref_type=heads"
                 f"#L{relevant_line_start}"
             )
         return link
