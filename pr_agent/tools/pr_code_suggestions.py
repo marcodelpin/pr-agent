@@ -152,7 +152,7 @@ class PRCodeSuggestions:
         self._setup_incremental_scope()
         # If incremental is active but the scope came back empty (no files changed since the
         # previous suggestions pass), short-circuit init now. `run()` checks the same flag and
-        # exits without touching the model. This avoids a wasted `mr.changes()` round-trip via
+        # exits without touching the model. This avoids a wasted full MR-diff retrieval via
         # `get_files()` — when `unreviewed_files_map` is `{}` it's falsy and `get_files()` falls
         # back to the full MR file list, which is pure waste on the "nothing new" path.
         if (self.incremental.is_incremental
@@ -1271,6 +1271,8 @@ class PRCodeSuggestions:
                 existing_code if new_code_snippet else None)
             if new_code_snippet and has_valid_anchor:
                 new_code_snippet = self.dedent_code(relevant_file, relevant_lines_start, new_code_snippet)
+                existing_code = self.dedent_code(relevant_file, relevant_lines_start, existing_code)
+                d = {**d, "existing_code": existing_code, "improved_code": new_code_snippet}
 
             requires_pr_fallback = False
             if d.get('_is_truncated'):

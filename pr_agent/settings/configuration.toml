@@ -63,9 +63,9 @@ output_run_details=false # if true, append an agent run details section (model, 
 output_run_cost=false # if true, collect estimated LiteLLM API cost and include it inside the enabled run details section
 large_patch_policy = "clip" # "clip", "skip"
 duplicate_prompt_examples = false
-# Enable persistent inline comments (issue #2037) to fingerprint each inline comment,
-# embed a provider-compatible marker, and skip
-# re-posting suggestions already present on the PR/MR across runs.
+# Enable persistent inline comments (issue #2037) to fingerprint each inline comment and
+# embed a provider-compatible marker, then skip re-posting suggestions already present
+# on the PR/MR across runs.
 persistent_inline_comments = false
 # seed
 seed=-1 # set positive value to fix the seed (and ensure temperature=0)
@@ -98,6 +98,16 @@ propagate_tool_errors = false # when true, a tool re-raises instead of swallowin
 enable_ai_metadata = false # will enable adding ai metadata
 add_user_to_requests = false # send the current command and PR URL in the OpenAI-compatible "user" request field, for provider-side attribution of requests (e.g. OpenRouter "external_user")
 reasoning_effort = "medium" # "none", "minimal", "low", "medium", "high", "xhigh", "max"
+# Optional: additional model IDs that accept config.reasoning_effort. Appends to the built-in
+# SUPPORT_REASONING_EFFORT_MODELS list (pr_agent/algo/__init__.py) instead of replacing it, so
+# fallback_models mixing a custom endpoint model with a built-in reasoning model keep receiving
+# the configured effort. Model IDs match exactly or through any provider prefix
+# (e.g. "deepseek-v4-flash-0731" matches "openai/deepseek-v4-flash-0731"). LiteLLM whitelists
+# reasoning_effort through allowed_openai_params for OpenAI-compatible models it does not
+# recognize, so the parameter reaches the endpoint. The default "medium" may be rejected by
+# providers that accept a different subset (e.g. "none"/"low"/"high"/"max"); adding a custom
+# model id now surfaces a provider-side error instead of the previous silent drop.
+additional_reasoning_effort_models = []
 # extended thinking for Claude reasoning models
 enable_claude_extended_thinking = false # Set to true to enable extended thinking feature
 extended_thinking_budget_tokens = 2048
@@ -119,6 +129,11 @@ extract_issue_from_branch = true
 # to default if missing). If empty, uses default pattern: first 1-6 digits at start of branch or after a slash,
 # followed by hyphen or end (e.g. feature/1-test, 123-fix). GitHub only; other providers planned for later.
 branch_issue_regex = ""
+# Configure a regex replacing bare #N references, with exactly one capturing group for an ASCII issue number.
+# Leave empty for default matching (up to six digits); fall back with a warning on invalid patterns.
+# Set the custom digit limit in the pattern; use only integer-parseable captures. Keep full URLs and owner/repo#N references.
+# Use TOML literal quotes to preserve backslashes, e.g. description_issue_regex = '(?i)(?:fixes|closes|resolves)\s+#(\d+)'
+description_issue_regex = ""
 
 
 [pr_reviewer] # /review #
@@ -325,6 +340,12 @@ publish_improve_as_thread = false
 publish_code_suggestions_as_review = false
 # Resolve the bot's own inline threads that a later push left on an outdated diff version.
 resolve_outdated_inline_threads = false
+# Resolve the bot's own inline threads whose flagged line was modified after the
+# comment was posted - i.e. the diff between the comment's head sha and the
+# current head sha removes/replaces that line. Unlike resolve_outdated_inline_threads
+# this is content-based: threads on lines nobody touched (or merely shifted by
+# unrelated insertions) stay open.
+auto_resolve_fixed_inline_threads = false
 handle_push_trigger = false
 push_commands = [
     "/describe",
