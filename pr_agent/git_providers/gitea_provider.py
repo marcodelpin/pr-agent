@@ -8,8 +8,9 @@ from giteapy.rest import ApiException
 from pr_agent.algo.file_filter import filter_ignored
 from pr_agent.algo.git_patch_processing import decode_if_bytes
 from pr_agent.algo.language_handler import is_valid_file
+from pr_agent.algo.token_budget import clip_tokens
 from pr_agent.algo.types import EDIT_TYPE
-from pr_agent.algo.utils import clip_tokens, find_line_number_of_relevant_line_in_file
+from pr_agent.algo.utils import find_line_number_of_relevant_line_in_file
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers.git_provider import (
     MAX_FILES_ALLOWED_FULL,
@@ -310,9 +311,6 @@ class GiteaProvider(GitProvider):
         if self.owner and self.repo and self.pr_number:
             return f"{self.base_url_html}/{self.owner}/{self.repo}/pulls/{self.pr_number}"
         return self.pr_url
-
-    def get_issue_url(self) -> str:
-        return self.issue_url
 
     def get_latest_commit_url(self) -> str:
         return self.last_commit.html_url if self.last_commit else ""
@@ -1189,19 +1187,6 @@ class RepoApi(giteapy.RepositoryApi):
         return self.repository.repo_get_all_commits(
             owner=owner,
             repo=repo
-        )
-
-    def add_reviewer(self, owner: str, repo: str, pr_number: int, reviewers: List[str]):
-        body = {
-            "reviewers": reviewers
-        }
-        return self.api_client.call_api(
-            '/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers',
-            'POST',
-            path_params={'owner': owner, 'repo': repo, 'pr_number': pr_number},
-            body=body,
-            response_type='Repository',
-            auth_settings=['AuthorizationHeaderToken']
         )
 
     def add_reaction_comment(self, owner: str, repo: str, comment_id: int, reaction: str):

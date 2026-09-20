@@ -406,34 +406,28 @@ The `litellm.model_id` parameter applies only to classic `bedrock/` calls made t
 
 Claude Sonnet 5 on Bedrock is invoked through an inference profile rather than a direct
 foundation-model id. When that profile is an application inference profile, its ARN is an
-opaque value that carries no model name. Thinking configuration in PR-Agent is gated on
-recognizing the model, so the opaque ARN can never match: `enable_claude_adaptive_thinking`
-requires a recognized Claude 5 model name in the id, and `enable_claude_extended_thinking`
-requires exact membership in `claude_extended_thinking_models`. PR-Agent logs a warning in
-that case, so the unconfigured state is no longer silent.
+opaque value that carries no model name. Add that ARN to
+`claude_adaptive_thinking_models_override` so PR-Agent and LiteLLM both treat it as an
+adaptive-thinking model:
 
-Address the model by name and pass the profile ARN through `litellm.model_id`, which is what
-the invocation actually uses:
+Use the ARN as the model id and repeat that exact value in the override:
 
 ```toml
 [config] # in configuration.toml
-model = "bedrock/converse/eu.anthropic.claude-sonnet-5"
-fallback_models = ["bedrock/converse/eu.anthropic.claude-sonnet-5"]
-enable_claude_adaptive_thinking = true # requires a recognizable claude 5 model name in `model`
-
-[litellm]
-model_id = "arn:aws:bedrock:eu-central-1:<account-id>:application-inference-profile/<profile-id>"
+model = "bedrock/converse/arn:aws:bedrock:eu-central-1:<account-id>:application-inference-profile/<profile-id>"
+enable_claude_adaptive_thinking = true
+claude_adaptive_thinking_models_override = [
+    "bedrock/converse/arn:aws:bedrock:eu-central-1:<account-id>:application-inference-profile/<profile-id>"
+]
 ```
 
-Cost attribution is preserved through the application inference profile, and because `model`
-is the named id, the adaptive-thinking payload is applied and kept intact.
+The override is additive, so named Claude models in the same fallback chain continue to use
+built-in detection. PR-Agent also registers each override with LiteLLM, preventing LiteLLM from
+converting the adaptive payload to the legacy `budget_tokens` shape that Bedrock rejects.
 
-Two caveats. First, ARNs only fail the detection when the suffix is opaque: an ARN that
-embeds the model family, for example `...:inference-profile/us.anthropic.claude-sonnet-5`,
-normalises to a string the adaptive regex does match. The miss is specific to application
-inference profiles with an opaque hex suffix. Second, `litellm.model_id` is a single global
-value applied to every model whose id contains `bedrock/`, so this configuration cannot point
-different models at different profiles within one fallback chain without per-call handling.
+ARNs only need the override when the suffix is opaque. An ARN that embeds the model family,
+for example `...:inference-profile/us.anthropic.claude-sonnet-5`, normalises to a string the
+adaptive regex already matches.
 
 #### Using a Custom VPC Endpoint (PrivateLink)
 
@@ -635,7 +629,7 @@ for the [Auto](https://openrouter.ai/docs/guides/routing/routers/auto-router),
 
 #### Openrouter provider routing, reasoning and output cap
 
-For `openrouter/...` models you can optionally restrict which upstream providers Openrouter uses, control reasoning, and cap the completion length. All keys live in the `[openrouter]` section of `configuration.toml`. Models listed in [`SUPPORT_REASONING_EFFORT_MODELS`](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/algo/__init__.py) inherit `config.reasoning_effort` unless an Openrouter-specific effort or token budget is set.
+For `openrouter/...` models you can optionally restrict which upstream providers Openrouter uses, control reasoning, and cap the completion length. All keys live in the `[openrouter]` section of `configuration.toml`. Reasoning-capable models are those litellm's bundled reasoning metadata flags over the model id and its provider-prefixed/`xai/`-forms, the maintained Grok registry, or `config.additional_reasoning_effort_models`; they inherit `config.reasoning_effort` unless an Openrouter-specific effort or token budget is set.
 
 ```toml
 [openrouter]
@@ -676,7 +670,7 @@ OPENAI__KEY=...
 
 (you can obtain an OrcaRouter API key from [here](https://www.orcarouter.ai/register))
 
-Keep the `openai/` prefix on the model name, whatever OrcaRouter model ID you use (`openai/anthropic/claude-fable-5`, `openai/auto`, ...): the prefix routes the request through litellm's OpenAI-compatible path. A prefixed name is not in the `MAX_TOKENS` table [here](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/algo/__init__.py), so you also have to set `custom_model_max_tokens`. OrcaRouter governs routing and guardrails itself, but `config.reasoning_effort` still reaches it: PR-Agent matches the last segment of the model ID against `SUPPORT_REASONING_EFFORT_MODELS`, so an ID such as `openai/google/gemini-2.5-pro` or `openai/o3` sends the configured effort (default `"medium"`) even with nothing set. The example IDs above are not in that list and are unaffected.
+Keep the `openai/` prefix on the model name, whatever OrcaRouter model ID you use (`openai/anthropic/claude-fable-5`, `openai/auto`, ...): the prefix routes the request through litellm's OpenAI-compatible path. A prefixed name is not in the `MAX_TOKENS` table [here](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/algo/__init__.py), so you also have to set `custom_model_max_tokens`. OrcaRouter governs routing and guardrails itself, but `config.reasoning_effort` still reaches it: PR-Agent probes the suffixed model ID against litellm's bundled reasoning metadata (or `config.additional_reasoning_effort_models`), so an ID such as `openai/google/gemini-2.5-pro` or `openai/o3` sends the configured effort (default `"medium"`) even with nothing set. The example IDs above are not flagged as reasoning-capable and are unaffected.
 
 ### Neon AI Gateway
 
@@ -795,7 +789,7 @@ reasoning_effort = "medium" # "none", "minimal", "low", "medium", "high", "xhigh
 
 With the OpenAI models that support reasoning effort (eg: gpt-5.6-terra), you can specify its reasoning effort via `config` section. The default value is `medium`. You can change it to any supported value based on your usage. Available values depend on the model and provider.
 
-For a model served through an OpenAI-compatible endpoint that is not in the built-in [`SUPPORT_REASONING_EFFORT_MODELS`](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/algo/__init__.py) list, add its ID to `config.additional_reasoning_effort_models`. The list is additive: built-in reasoning models keep receiving `config.reasoning_effort`, and IDs match exactly or through any provider prefix (e.g. `"deepseek-v4-flash-0731"` matches `"openai/deepseek-v4-flash-0731"`). When LiteLLM does not recognize the model, PR-Agent sets `allowed_openai_params = ["reasoning_effort"]` so the parameter reaches the endpoint. Note the default `"medium"` may be rejected by providers that accept a different subset (e.g. `"none"/"low"/"high"/"max"`); adding a custom model ID surfaces that provider-side error instead of silently dropping the setting.
+For a model served through an OpenAI-compatible endpoint that litellm does not recognize as reasoning-capable, add its ID to `config.additional_reasoning_effort_models`. For known models support is decided by litellm's bundled reasoning metadata plus the maintained Grok registry (Grok ids resolve through their `xai/` prefix) with Claude models left out of the metadata path (their reasoning comes from the dedicated extended/adaptive thinking settings; an explicit entry in the list above still applies to them). Config IDs match exactly or through any provider prefix (e.g. `"deepseek-v4-flash-0731"` matches `"openai/deepseek-v4-flash-0731"`). When LiteLLM does not recognize the model, PR-Agent sets `allowed_openai_params = ["reasoning_effort"]` so the parameter reaches the endpoint. Note the default `"medium"` may be rejected by providers that accept a different subset (e.g. `"none"/"low"/"high"/"max"`); adding a custom model ID surfaces that provider-side error instead of silently dropping the setting.
 
 To use [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra):
 

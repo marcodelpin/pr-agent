@@ -11,6 +11,15 @@ from urllib.parse import quote, unquote, urlparse
 
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 
+from ..algo.comment_identity import (
+    PRCodeSuggestionsIdentity,
+    PRDescriptionHeader,
+    add_comment_identity,
+    comment_matches_any_identity,
+    comment_matches_identity,
+    format_pr_code_suggestions_header,
+    get_pr_review_comment_identifiers,
+)
 from ..algo.file_filter import filter_ignored
 from ..algo.inline_comment_dedup import (
     body_with_markers,
@@ -22,14 +31,7 @@ from ..algo.inline_comment_dedup import (
 )
 from ..algo.language_handler import build_language_file_matcher, is_valid_file
 from ..algo.utils import (
-    PRCodeSuggestionsIdentity,
-    PRDescriptionHeader,
-    add_comment_identity,
-    comment_matches_any_identity,
-    comment_matches_identity,
     find_line_number_of_relevant_line_in_file,
-    format_pr_code_suggestions_header,
-    get_pr_review_comment_identifiers,
     load_large_diff,
 )
 from ..config_loader import get_settings, get_verbosity_level
@@ -1662,12 +1664,6 @@ class AzureDevopsProvider(GitProvider):
 
     def remove_reaction(self, issue_comment_id: int, reaction_id: int) -> bool:
         return True
-
-    def set_like(self, thread_id: int, comment_id: int, create: bool = True):
-        if create:
-            self.azure_devops_client.create_like(self.repo_slug, self.pr_num, thread_id, comment_id, project=self.workspace_slug)
-        else:
-            self.azure_devops_client.delete_like(self.repo_slug, self.pr_num, thread_id, comment_id, project=self.workspace_slug)
 
     def set_thread_status(self, thread_id: int, status: str) -> bool:
         try:

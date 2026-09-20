@@ -1,7 +1,6 @@
 import copy
 import difflib
 import hashlib
-import itertools
 import json
 import os
 import re
@@ -16,6 +15,10 @@ from github.Issue import Issue
 from retry.api import retry_call
 from starlette_context import context
 
+from ..algo.comment_identity import (
+    comment_matches_any_identity,
+    get_pr_review_comment_identifiers,
+)
 from ..algo.file_filter import filter_ignored
 from ..algo.git_patch_processing import extract_hunk_headers
 from ..algo.inline_comment_dedup import (
@@ -26,13 +29,11 @@ from ..algo.inline_comment_dedup import (
     has_marker,
 )
 from ..algo.language_handler import is_valid_file
+from ..algo.token_budget import clip_tokens
 from ..algo.types import EDIT_TYPE
 from ..algo.utils import (
     Range,
-    clip_tokens,
-    comment_matches_any_identity,
     find_line_number_of_relevant_line_in_file,
-    get_pr_review_comment_identifiers,
     load_large_diff,
     set_file_languages,
 )
@@ -85,6 +86,7 @@ class GithubProvider(GitProvider):
         self.incremental = IncrementalPR(False)
         self._resolved_config_branch: str | None = None
         self._check_run_ids: dict = {}
+        self._check_runs_in_progress: set = set()
         if pr_url and 'pull' in pr_url:
             self.set_pr(pr_url)
             self.pr_commits = list(self.pr.get_commits())
@@ -621,38 +623,73 @@ class GithubProvider(GitProvider):
             raise RuntimeError("GitHub identity cannot be verified")
         return login.casefold() == agent_login.casefold()
 
+    @staticmethod
+    def _check_run_name(name: str) -> str:
+        return f"PR Agent - {name.capitalize()}"
+
     def _publish_check_run(self, text: str, name: str) -> bool:
-        if not getattr(self, 'last_commit_id', None):
-            get_logger().error("Cannot publish check run without a commit SHA")
-            return False
-        conclusion = "neutral"
-        check_run_name = f"PR Agent - {name.capitalize()}"
+        check_run_name = self._check_run_name(name)
         summary = text.split("\n\n")[0] if "\n\n" in text else text[:200]
         summary = summary.strip(" #")
         # GitHub Checks API limits: text 65535 chars, summary 65535 chars
         max_text = 65535
         if len(text) > max_text:
             text = text[:max_text]
-        create_body = {
-            "name": check_run_name,
-            "head_sha": self.last_commit_id.sha,
+        body = {
             "status": "completed",
-            "conclusion": conclusion,
+            "conclusion": "neutral",
             "output": {
                 "title": check_run_name,
                 "summary": summary[:300],
                 "text": text,
             },
         }
-        update_body = {
+        if self._upsert_check_run(name, body):
+            self._check_runs_in_progress.discard(name)
+            return True
+        return False
+
+    def start_check_run(self, name: str, summary: str) -> bool:
+        """Open the tool's check run as in_progress before it has any output to publish.
+
+        Automatic commands publish no progress comment, so this is the first sign that the
+        pull request was picked up. `_publish_check_run` completes the same run in place.
+        """
+        body = {
+            "status": "in_progress",
+            "output": {"title": self._check_run_name(name), "summary": summary[:300]},
+        }
+        if self._upsert_check_run(name, body):
+            self._check_runs_in_progress.add(name)
+            return True
+        return False
+
+    def finish_check_run(self, name: str, conclusion: str, summary: str) -> bool:
+        """Complete a check run opened by `start_check_run` that no tool completed.
+
+        A no-op when the tool already published its output to the run, so its conclusion
+        and text are kept. Otherwise the run would stay in_progress on the commit forever.
+        """
+        if name not in self._check_runs_in_progress:
+            return False
+        body = {
             "status": "completed",
             "conclusion": conclusion,
-            "output": {
-                "title": check_run_name,
-                "summary": summary[:300],
-                "text": text,
-            },
+            "output": {"title": self._check_run_name(name), "summary": summary[:300]},
         }
+        if self._upsert_check_run(name, body):
+            self._check_runs_in_progress.discard(name)
+            return True
+        return False
+
+    def _upsert_check_run(self, name: str, body: dict) -> bool:
+        """Update the `PR Agent - {Name}` check run on the head commit, creating it if absent."""
+        if not getattr(self, 'last_commit_id', None):
+            get_logger().error("Cannot publish check run without a commit SHA")
+            return False
+        check_run_name = self._check_run_name(name)
+        create_body = {"name": check_run_name, "head_sha": self.last_commit_id.sha, **body}
+        update_body = body
         existing_id = self._check_run_ids.get(name)
         if not existing_id:
             existing_id = self._find_existing_check_run(check_run_name, self.last_commit_id.sha)
@@ -676,7 +713,7 @@ class GithubProvider(GitProvider):
             self._check_run_ids[name] = data["id"]
             return True
         except Exception:
-            get_logger().warning("Failed to create check run, falling back to comment")
+            get_logger().warning("Failed to create check run")
             return False
 
     def _find_existing_check_run(self, check_run_name: str, head_sha: str) -> Optional[int]:
@@ -1147,17 +1184,6 @@ class GithubProvider(GitProvider):
             get_logger().exception("Failed to edit github comment", artifact={"error": e})
             return False
 
-    def edit_comment_from_comment_id(self, comment_id: int, body: str):
-        try:
-            # self.pr.get_issue_comment(comment_id).edit(body)
-            body = self.limit_output_characters(body, self.max_comment_chars)
-            headers, data_patch = self.pr._requester.requestJsonAndCheck(
-                "PATCH", f"{self.base_url}/repos/{self.repo}/issues/comments/{comment_id}",
-                input={"body": body}
-            )
-        except Exception as e:
-            get_logger().exception(f"Failed to edit comment, error: {e}")
-
     def reply_to_comment_from_comment_id(self, comment_id: int, body: str):
         try:
             # self.pr.get_issue_comment(comment_id).edit(body)
@@ -1168,17 +1194,6 @@ class GithubProvider(GitProvider):
             )
         except Exception as e:
             get_logger().exception(f"Failed to reply comment, error: {e}")
-
-    def get_comment_body_from_comment_id(self, comment_id: int):
-        try:
-            # self.pr.get_issue_comment(comment_id).edit(body)
-            headers, data_patch = self.pr._requester.requestJsonAndCheck(
-                "GET", f"{self.base_url}/repos/{self.repo}/issues/comments/{comment_id}"
-            )
-            return data_patch.get("body","")
-        except Exception as e:
-            get_logger().exception(f"Failed to edit comment, error: {e}")
-            return None
 
     def remove_initial_comment(self):
         try:
@@ -1203,11 +1218,6 @@ class GithubProvider(GitProvider):
 
     def get_pr_branch(self):
         return self.pr.head.ref
-
-    def get_pr_owner_id(self) -> str | None:
-        if not self.repo:
-            return None
-        return self.repo.split('/')[0]
 
     def get_owning_namespace(self, *, resolved: bool = False) -> Optional[str]:
         # Be robust to providers built without full __init__ (e.g. __new__ in tests/helpers):
@@ -1512,9 +1522,6 @@ class GithubProvider(GitProvider):
             get_logger().debug(f"Could not resolve the default branch revision for repo context: {e}")
             return None
 
-    def get_workspace_name(self):
-        return self.repo.split('/')[0]
-
     # The reaction API accepts only this closed set; anything else is rejected with 422.
     SUPPORTED_REACTIONS = ("+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes")
 
@@ -1661,14 +1668,22 @@ class GithubProvider(GitProvider):
     def _get_pr(self):
         return self._get_repo().get_pull(self.pr_num)
 
-    def get_pr_file_content(self, file_path: str, branch: str) -> str:
+    def get_pr_file_content(self, file_path: str, branch: str, propagate_errors: bool = False) -> str:
         try:
             file_content_str = str(
                 self._get_repo()
                 .get_contents(file_path, ref=branch)
                 .decoded_content.decode()
             )
+        except GithubException as e:
+            if e.status == 404:
+                return ""
+            if propagate_errors:
+                raise
+            file_content_str = ""
         except Exception:
+            if propagate_errors:
+                raise
             file_content_str = ""
         return file_content_str
 
@@ -1720,10 +1735,6 @@ class GithubProvider(GitProvider):
             get_logger().exception(f"Failed to get labels, error: {e}")
             return []
 
-    def get_repo_labels(self):
-        labels = self.repo_obj.get_labels()
-        return [label for label in itertools.islice(labels, 50)]
-
     def get_commit_messages(self) -> str:
         """
         Retrieves the commit messages of a pull request.
@@ -1741,30 +1752,6 @@ class GithubProvider(GitProvider):
         if max_tokens:
             commit_messages_str = clip_tokens(commit_messages_str, max_tokens)
         return commit_messages_str
-
-    def generate_link_to_relevant_line_number(self, suggestion) -> str:
-        try:
-            relevant_file = suggestion['relevant_file'].strip('`').strip("'").strip('\n')
-            relevant_line_str = suggestion['relevant_line'].strip('\n')
-            if not relevant_line_str:
-                return ""
-
-            position, absolute_position = find_line_number_of_relevant_line_in_file \
-                (self.diff_files, relevant_file, relevant_line_str)
-
-            if absolute_position != -1:
-                # # link to right file only
-                # link = f"https://github.com/{self.repo}/blob/{self.pr.head.sha}/{relevant_file}" \
-                #        + "#" + f"L{absolute_position}"
-
-                # link to diff
-                sha_file = hashlib.sha256(relevant_file.encode('utf-8')).hexdigest()
-                link = f"{self.base_url_html}/{self.repo}/pull/{self.pr_num}/files#diff-{sha_file}R{absolute_position}"
-                return link
-        except Exception as e:
-            get_logger().info(f"Failed adding line link, error: {e}")
-
-        return ""
 
     def get_line_link(self, relevant_file: str, relevant_line_start: int, relevant_line_end: int = None) -> str:
         sha_file = hashlib.sha256(relevant_file.encode('utf-8')).hexdigest()

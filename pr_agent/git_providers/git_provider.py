@@ -9,16 +9,15 @@ from collections.abc import Iterable
 from typing import Optional, Tuple
 from urllib.parse import urlsplit
 
-from pr_agent.algo.language_handler import numeric_languages
-from pr_agent.algo.types import FilePatchInfo
-from pr_agent.algo.utils import (
-    Range,
+from pr_agent.algo.comment_identity import (
     add_pr_review_identity,
     comment_carries_other_identity,
     comment_matches_identity,
-    process_description,
     render_hidden_marker,
 )
+from pr_agent.algo.language_handler import numeric_languages
+from pr_agent.algo.types import FilePatchInfo
+from pr_agent.algo.utils import Range, process_description
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
@@ -432,17 +431,11 @@ class GitProvider(ABC):
     def edit_comment(self, comment, body: str):
         pass
 
-    def edit_comment_from_comment_id(self, comment_id: int, body: str):
-        pass
-
-    def get_comment_body_from_comment_id(self, comment_id: int) -> str:
-        pass
-
     def reply_to_comment_from_comment_id(self, comment_id: int, body: str):
         pass
 
     def get_pr_description(self, full: bool = True, split_changes_walkthrough=False) -> str | tuple:
-        from pr_agent.algo.utils import clip_tokens
+        from pr_agent.algo.token_budget import clip_tokens
         from pr_agent.config_loader import get_settings
         max_tokens_description = get_settings().get("CONFIG.MAX_DESCRIPTION_TOKENS", None)
         description = self.get_pr_description_full() if full else self.get_user_description()
@@ -646,9 +639,6 @@ class GitProvider(ABC):
         repo-context support at all.
         """
         return None
-
-    def get_workspace_name(self):
-        return ""
 
     def get_pr_id(self):
         return ""
@@ -878,9 +868,6 @@ class GitProvider(ABC):
 
     @abstractmethod
     def get_pr_labels(self, update=False):
-        pass
-
-    def get_repo_labels(self):
         pass
 
     def add_reaction(self, issue_comment_id: int, reaction: str) -> Optional[int]:

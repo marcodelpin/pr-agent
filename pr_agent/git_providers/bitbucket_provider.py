@@ -493,26 +493,6 @@ class BitbucketProvider(GitProvider):
             link = f"{self.pr_url}/#L{relevant_file}T{relevant_line_start}"
         return link
 
-    def generate_link_to_relevant_line_number(self, suggestion) -> str:
-        try:
-            relevant_file = suggestion['relevant_file'].strip('`').strip("'").rstrip()
-            relevant_line_str = suggestion['relevant_line'].rstrip()
-            if not relevant_line_str:
-                return ""
-
-            diff_files = self.get_diff_files()
-            position, absolute_position = find_line_number_of_relevant_line_in_file \
-                (diff_files, relevant_file, relevant_line_str)
-
-            if absolute_position != -1 and self.pr_url:
-                link = f"{self.pr_url}/#L{relevant_file}T{absolute_position}"
-                return link
-        except Exception as e:
-            if get_verbosity_level() >= 2:
-                get_logger().info(f"Failed adding line link, error: {e}")
-
-        return ""
-
     def publish_inline_comments(self, comments: list[dict]) -> bool:
         publishable_count = 0
         published_count = 0
@@ -556,9 +536,6 @@ class BitbucketProvider(GitProvider):
             return response_repo['mainbranch']['name']
         except:
             return self.pr.destination_branch
-
-    def get_pr_owner_id(self) -> str | None:
-        return self.workspace_slug
 
     def get_owning_namespace(self) -> str | None:
         if not getattr(self, "headers", None):
@@ -672,10 +649,8 @@ class BitbucketProvider(GitProvider):
             "branch": branch
         }
         headers = {'Authorization': self.headers['Authorization']} if 'Authorization' in self.headers else {}
-        try:
-            requests.request("POST", url, headers=headers, data=data, files=files)
-        except Exception:
-            get_logger().exception(f"Failed to create empty file {file_path} in branch {branch}")
+        response = requests.request("POST", url, headers=headers, data=data, files=files)
+        response.raise_for_status()
 
     def _get_pr_file_content(self, remote_link: str):
         try:
