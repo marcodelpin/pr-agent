@@ -44,6 +44,7 @@ from .git_provider import (
     MAX_FILES_ALLOWED_FULL,
     FilePatchInfo,
     GitProvider,
+    IncompletePullRequestFilesError,
     IncrementalPR,
     get_config_branch,
     redact_credentials,
@@ -59,10 +60,6 @@ def _next_page_url(headers: dict) -> str:
         if match:
             return match.group(1)
     return ""
-
-
-class IncompletePullRequestFilesError(RuntimeError):
-    """Represent an incomplete or inconsistent GitHub pull-request file set."""
 
 
 class GithubProvider(GitProvider):
@@ -493,6 +490,11 @@ class GithubProvider(GitProvider):
 
     def get_latest_commit_url(self) -> str:
         return self.last_commit_id.html_url
+
+    def get_pr_head_sha(self) -> str:
+        head = getattr(self.pr, "head", None)
+        head_sha = getattr(head, "sha", None)
+        return head_sha if isinstance(head_sha, str) else ""
 
     def get_comment_url(self, comment) -> str:
         return comment.html_url
