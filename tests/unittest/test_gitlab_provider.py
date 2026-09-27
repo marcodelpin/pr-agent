@@ -9,9 +9,8 @@ from gitlab.v4.objects import ProjectFile, ProjectMergeRequest, ProjectMergeRequ
 from requests.exceptions import RequestException
 
 from pr_agent.algo.comment_identity import PRCodeSuggestionsIdentity, PRReviewHeader, PRReviewIdentity
-from pr_agent.git_providers.git_provider import IncrementalPR
+from pr_agent.git_providers.git_provider import DEFAULT_DISCUSSION_CONTEXT_CHARS, IncrementalPR
 from pr_agent.git_providers.gitlab_provider import (
-    _MAX_DISCUSSION_CONTEXT_CHARS,
     GitLabProvider,
     _GitLabIncrementalCommit,
     _GitLabIncrementalNote,
@@ -562,6 +561,74 @@ class TestGitLabProvider:
         m_pbp.assert_called_once_with("grp/repo")
         proj.repository_compare.assert_called_once_with("old", "new")
 
+    @pytest.mark.parametrize(
+        "comparison, reason",
+        [
+            ({"compare_timeout": True, "diffs": [{"diff": "partial"}]}, "timed out"),
+            ({"diffs": [{"diff": "partial", "collapsed": True}]}, "collapsed"),
+            ({"diffs": [{"diff": "partial", "too_large": True}]}, "too large"),
+        ],
+    )
+    def test_compare_submodule_skips_incomplete_child_diffs_once_cached(
+        self, gitlab_provider, comparison, reason
+    ):
+        proj = MagicMock()
+        proj.repository_compare.return_value = comparison
+
+        with patch.object(gitlab_provider, "_project_by_path", return_value=proj), \
+             patch("pr_agent.git_providers.gitlab_provider.get_logger") as mock_logger:
+            first = gitlab_provider._compare_submodule("grp/repo", "old", "new")
+            second = gitlab_provider._compare_submodule("grp/repo", "old", "new")
+
+        assert first == second == []
+        proj.repository_compare.assert_called_once_with("old", "new")
+        mock_logger.return_value.warning.assert_called_once()
+        assert reason in mock_logger.return_value.warning.call_args.args[0]
+
+    @pytest.mark.parametrize(
+        "comparison, expected_diffs",
+        [
+            ({"diffs": []}, []),
+            ({"compare_timeout": False, "diffs": [{"diff": "complete"}]}, [{"diff": "complete"}]),
+            (
+                {"diffs": [{"diff": "complete", "collapsed": False, "too_large": False}]},
+                [{"diff": "complete", "collapsed": False, "too_large": False}],
+            ),
+        ],
+    )
+    def test_compare_submodule_keeps_complete_responses_silent(self, gitlab_provider, comparison, expected_diffs):
+        proj = MagicMock()
+        proj.repository_compare.return_value = comparison
+
+        with patch.object(gitlab_provider, "_project_by_path", return_value=proj), \
+             patch("pr_agent.git_providers.gitlab_provider.get_logger") as mock_logger:
+            result = gitlab_provider._compare_submodule("grp/repo", "old", "new")
+
+        assert result == expected_diffs
+        mock_logger.return_value.warning.assert_not_called()
+
+    def test_get_diff_files_keeps_parent_gitlink_when_submodule_compare_is_incomplete(self, gitlab_provider):
+        gitlab_provider._get_merge_request_changes = MagicMock(return_value={
+            "changes": [self._submodule_bump()],
+            "diff_refs": {"base_sha": "base", "head_sha": "head"},
+        })
+        child_project = MagicMock()
+        child_project.repository_compare.return_value = {
+            "compare_timeout": True,
+            "diffs": [{"old_path": "child.py", "new_path": "child.py", "diff": "partial"}],
+        }
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {"GITLAB.EXPAND_SUBMODULE_DIFFS": True}.get(key, default)
+
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings), \
+             patch.object(gitlab_provider, "_get_gitmodules_map", return_value={"src/lib_a": "group/child.git"}), \
+             patch.object(gitlab_provider, "_project_by_path", return_value=child_project), \
+             patch.object(gitlab_provider, "get_pr_file_content", return_value=""):
+            files = gitlab_provider.get_diff_files()
+
+        assert [file.filename for file in files] == ["src/lib_a"]
+        child_project.repository_compare.assert_called_once_with("aaa1111", "bbb2222")
+
     def test_compare_submodule_cache_hit_skips_project_resolution(self, gitlab_provider):
         cached_diffs = [{"diff": "d"}]
         gitlab_provider._submodule_cache[("grp/repo", "old", "new")] = cached_diffs
@@ -646,13 +713,52 @@ class TestGitLabProvider:
         with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings):
             assert gitlab_provider.should_publish_review_as_thread() is False
 
+    @pytest.mark.parametrize("configured", [True, False])
+    def test_should_reply_to_trigger_comment_reflects_config(self, gitlab_provider, configured):
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {
+            "GITLAB.REPLY_TO_TRIGGER_COMMENT": configured,
+        }.get(key, default)
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings):
+            assert gitlab_provider.should_reply_to_trigger_comment() is configured
+
     def test_publish_comment_defaults_to_a_note(self, gitlab_provider):
-        # Without as_thread (status comments, other tools), publishing stays a plain note.
+        # Without a trigger discussion, publishing stays a plain note.
         gitlab_provider.mr = MagicMock()
         result = gitlab_provider.publish_comment("a status comment")
 
         gitlab_provider.mr.notes.create.assert_called_once_with({'body': 'a status comment'})
         gitlab_provider.mr.discussions.create.assert_not_called()
+        assert result is gitlab_provider.mr.notes.create.return_value
+
+    def test_publish_comment_replies_to_trigger_discussion(self, gitlab_provider):
+        gitlab_provider.mr = MagicMock()
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {
+            "GITLAB.REPLY_TO_TRIGGER_COMMENT": True,
+            "comment_id": "discussion-1",
+        }.get(key, default)
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings):
+            result = gitlab_provider.publish_comment("the review")
+
+        gitlab_provider.mr.discussions.get.assert_called_once_with("discussion-1")
+        gitlab_provider.mr.discussions.get.return_value.notes.create.assert_called_once_with(
+            {'body': 'the review'}
+        )
+        gitlab_provider.mr.notes.create.assert_not_called()
+        assert result is gitlab_provider.mr.discussions.get.return_value.notes.create.return_value
+
+    def test_publish_comment_falls_back_without_trigger_discussion(self, gitlab_provider):
+        gitlab_provider.mr = MagicMock()
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {
+            "GITLAB.REPLY_TO_TRIGGER_COMMENT": True,
+            "comment_id": "",
+        }.get(key, default)
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings):
+            result = gitlab_provider.publish_comment("the review")
+
+        gitlab_provider.mr.notes.create.assert_called_once_with({'body': 'the review'})
         assert result is gitlab_provider.mr.notes.create.return_value
 
     def test_publish_comment_as_thread_creates_a_discussion(self, gitlab_provider):
@@ -1087,8 +1193,44 @@ class TestGitLabProvider:
 
         result = gitlab_provider.get_code_suggestion_thread_context()
 
-        assert len(result) <= _MAX_DISCUSSION_CONTEXT_CHARS
+        assert len(result) <= DEFAULT_DISCUSSION_CONTEXT_CHARS
         assert len(json.loads(result)) < 60
+
+    def test_get_code_suggestion_thread_context_caps_replies_after_dropping_system_notes(self, gitlab_provider):
+        gitlab_provider._own_user_id = _BOT_USER_ID
+        human_replies = [{'author': {'id': 99, 'name': 'Alice'}, 'system': False, 'body': f'reply {i}'}
+                         for i in range(12)]
+        system_notes = [{'author': {'id': 99, 'name': 'Alice'}, 'system': True, 'body': 'changed this line'}
+                        for _ in range(5)]
+        thread = _thread([_thread_note(), *human_replies, *system_notes], discussion_id='d1')
+
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.discussions.list.return_value = [thread]
+
+        discussions = json.loads(gitlab_provider.get_code_suggestion_thread_context())
+
+        assert [reply["message"] for reply in discussions[0]["replies"]] == [f"reply {i}" for i in range(2, 12)]
+
+    def test_get_code_suggestion_thread_context_skips_threads_opened_by_a_human(self, gitlab_provider):
+        gitlab_provider._own_user_id = _BOT_USER_ID
+        human_thread = _thread([_thread_note(author_id=99)], discussion_id='human')
+        bot_thread = _thread([_thread_note()], discussion_id='bot')
+
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.discussions.list.return_value = [bot_thread, human_thread]
+
+        discussions = json.loads(gitlab_provider.get_code_suggestion_thread_context())
+
+        assert [discussion["thread_id"] for discussion in discussions] == ["bot"]
+
+    def test_get_code_suggestion_thread_context_keeps_threads_when_author_is_unverifiable(self, gitlab_provider):
+        gitlab_provider._own_user_id = None
+        gitlab_provider.mr = MagicMock()
+        gitlab_provider.mr.discussions.list.return_value = [_thread([_thread_note()], discussion_id='d1')]
+
+        discussions = json.loads(gitlab_provider.get_code_suggestion_thread_context())
+
+        assert [discussion["thread_id"] for discussion in discussions] == ["d1"]
 
     def test_get_code_suggestion_thread_context_empty_without_agent_threads(self, gitlab_provider):
         gitlab_provider.mr = MagicMock()
@@ -2203,6 +2345,40 @@ class TestGitLabIncrementalReview:
         # and the resulting file list reflects the expanded entries.
         m_exp.assert_called_once()
         assert [f.filename for f in files] == ["libs/sub/file.py"]
+
+    def test_incremental_get_diff_files_keeps_parent_gitlink_when_submodule_compare_is_incomplete(
+        self, gitlab_provider
+    ):
+        gitlab_provider.incremental = IncrementalPR(True)
+        gitlab_provider.unreviewed_files_map = {
+            "libs/sub": {
+                "new_path": "libs/sub",
+                "old_path": "libs/sub",
+                "diff": "-Subproject commit aaa1111\n+Subproject commit bbb2222\n",
+                "new_file": False,
+                "deleted_file": False,
+                "renamed_file": False,
+            }
+        }
+        gitlab_provider._incremental_head_sha = "head"
+        gitlab_provider.incremental.last_seen_commit = _GitLabIncrementalCommit(
+            self._make_commit("base", "2024-05-01T09:00:00Z")
+        )
+        child_project = MagicMock()
+        child_project.repository_compare.return_value = {
+            "diffs": [{"old_path": "child.py", "new_path": "child.py", "diff": "partial", "collapsed": True}],
+        }
+        settings = MagicMock()
+        settings.get.side_effect = lambda key, default=None: {"GITLAB.EXPAND_SUBMODULE_DIFFS": True}.get(key, default)
+
+        with patch("pr_agent.git_providers.gitlab_provider.get_settings", return_value=settings), \
+             patch.object(gitlab_provider, "_get_gitmodules_map", return_value={"libs/sub": "group/child.git"}), \
+             patch.object(gitlab_provider, "_project_by_path", return_value=child_project), \
+             patch.object(gitlab_provider, "get_pr_file_content", return_value=""):
+            files = gitlab_provider.get_diff_files()
+
+        assert [file.filename for file in files] == ["libs/sub"]
+        child_project.repository_compare.assert_called_once_with("aaa1111", "bbb2222")
 
 
 class TestGitLabCapabilities:

@@ -1,11 +1,10 @@
 import difflib
-import json
 import posixpath
 import re
 import urllib.parse
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 import gitlab
@@ -43,18 +42,12 @@ from ..config_loader import get_settings
 from ..log import get_logger
 from .git_provider import (
     MAX_FILES_ALLOWED_FULL,
+    CodeSuggestionThread,
     GitProvider,
     IncrementalPR,
     get_config_branch,
     redact_credentials,
 )
-
-# Bounds for the code-suggestion thread context block, matching the Azure DevOps provider:
-# a bounded JSON list of prior suggestion threads is injected into the /improve prompt.
-_MAX_DISCUSSION_CONTEXT_CHARS = 24000
-_MAX_DISCUSSION_REPLIES = 10
-_MAX_DISCUSSION_THREADS = 50
-_MAX_DISCUSSION_MESSAGE_CHARS = 750
 
 
 class DiffNotFoundError(Exception):
@@ -479,6 +472,20 @@ class GitLabProvider(GitProvider):
             cmp = proj.repository_compare(old_sha, new_sha)
             if isinstance(cmp, dict):
                 diffs = cmp.get("diffs", []) or []
+                incomplete_reason = None
+                if cmp.get("compare_timeout") is True:
+                    incomplete_reason = "compare timed out"
+                elif any(isinstance(diff, dict) and diff.get("collapsed") is True for diff in diffs):
+                    incomplete_reason = "a child diff is collapsed"
+                elif any(isinstance(diff, dict) and diff.get("too_large") is True for diff in diffs):
+                    incomplete_reason = "a child diff is too large"
+                if incomplete_reason:
+                    get_logger().warning(
+                        f"[submodule] compare incomplete for {proj_path} {old_sha}..{new_sha}: "
+                        f"{incomplete_reason}; child expansion skipped and parent submodule change remains"
+                    )
+                    self._submodule_cache[key] = []
+                    return []
             else:
                 diffs = []
             self._submodule_cache[key] = diffs
@@ -1141,6 +1148,9 @@ class GitLabProvider(GitProvider):
     def should_publish_improve_as_thread(self) -> bool:
         return bool(get_settings().get("GITLAB.PUBLISH_IMPROVE_AS_THREAD", False))
 
+    def should_reply_to_trigger_comment(self) -> bool:
+        return bool(get_settings().get("GITLAB.REPLY_TO_TRIGGER_COMMENT", False))
+
     def supports_review_comment_identity(self) -> bool:
         return True
 
@@ -1150,17 +1160,12 @@ class GitLabProvider(GitProvider):
     def supports_code_suggestion_state(self) -> bool:
         return True
 
-    def get_code_suggestion_thread_context(self) -> str:
-        """Return a bounded JSON block of prior code-suggestion threads on this MR.
-
-        Empty when the MR has no such threads or they cannot be listed.
-        """
+    def _iter_code_suggestion_threads(self) -> Iterator[CodeSuggestionThread]:
         try:
             discussions = self.mr.discussions.list(get_all=True)
         except (GitlabError, RequestException) as e:
             get_logger().warning(f"Failed to list discussions of merge request {self.id_mr}: {e}")
-            return ""
-        threads, context = [], ""
+            return
         for discussion in reversed(discussions):
             notes = discussion.attributes.get('notes') or []
             opener = notes[0] if notes and isinstance(notes[0], dict) else {}
@@ -1169,29 +1174,26 @@ class GitLabProvider(GitProvider):
             line = position.get('new_line') or position.get('old_line')
             if not isinstance(body, str) or not is_agent_inline_comment(body) or not isinstance(line, int):
                 continue
+            try:
+                authored_by_agent = self.is_comment_authored_by_pr_agent(opener)
+            except RuntimeError:
+                authored_by_agent = None
             replies = []
-            for note in notes[1:][-_MAX_DISCUSSION_REPLIES:]:
-                message = note.get('body') if isinstance(note, dict) and not note.get('system') else None
-                if isinstance(message, str) and message.strip():
-                    author = note.get('author') or {}
-                    replies.append({"author": author.get('name') or author.get('username') or "Unknown",
-                                    "message": message.strip()[:_MAX_DISCUSSION_MESSAGE_CHARS]})
-            threads.append({
-                "thread_id": discussion.id,
-                "status": "resolved" if opener.get('resolved') is True else "open",
-                "file": position.get('new_path') if position.get('new_line') else position.get('old_path'),
-                "start_line": line,
-                "end_line": line,
-                "suggestion": body.split("<!-- pr-agent", 1)[0].strip()[:_MAX_DISCUSSION_MESSAGE_CHARS],
-                "replies": replies,
-            })
-            candidate = json.dumps(threads, ensure_ascii=False, indent=2)
-            if len(candidate) > _MAX_DISCUSSION_CONTEXT_CHARS:
-                break
-            context = candidate
-            if len(threads) >= _MAX_DISCUSSION_THREADS:
-                break
-        return context
+            for note in notes[1:]:
+                if not isinstance(note, dict) or note.get('system'):
+                    continue
+                author = note.get('author') or {}
+                replies.append((author.get('name') or author.get('username'), note.get('body')))
+            yield CodeSuggestionThread(
+                thread_id=discussion.id,
+                status="resolved" if opener.get('resolved') is True else "open",
+                file=position.get('new_path') if position.get('new_line') else position.get('old_path'),
+                start_line=line,
+                end_line=line,
+                suggestion=body,
+                replies=replies,
+                authored_by_agent=authored_by_agent,
+            )
 
     def is_comment_authored_by_pr_agent(self, comment) -> bool:
         if isinstance(comment, dict):
@@ -1214,6 +1216,14 @@ class GitLabProvider(GitProvider):
             get_logger().debug(f"Skipping publish_comment for temporary comment: {mr_comment}")
             return None
         mr_comment = self.limit_output_characters(mr_comment, self.max_comment_chars)
+        # Reply to the triggering GitLab discussion only when explicitly enabled and available.
+        if (not is_temporary and self.should_reply_to_trigger_comment()
+                and (comment_id := get_settings().get("comment_id", ""))):
+            try:
+                return self.reply_to_comment_from_comment_id(comment_id, mr_comment)
+            except Exception as e:
+                get_logger().warning(f"Failed to reply to trigger discussion, falling back to a note: {e}")
+
         # When as_thread is set (only the review's final comment requests this), post it as a resolvable
         # thread (discussion) instead of a plain note. Temporary progress comments are never threaded.
         if as_thread and not is_temporary:
@@ -1408,7 +1418,7 @@ class GitLabProvider(GitProvider):
     def reply_to_comment_from_comment_id(self, comment_id: int, body: str):
         body = self.limit_output_characters(body, self.max_comment_chars)
         discussion = self.mr.discussions.get(comment_id)
-        discussion.notes.create({'body': body})
+        return discussion.notes.create({'body': body})
 
     def publish_inline_comment(self, body: str, relevant_file: str, relevant_line_in_file: str,
                                original_suggestion=None):
@@ -1644,6 +1654,12 @@ class GitLabProvider(GitProvider):
                         break
                 if target_file is None:
                     get_logger().warning(f"Skipping suggestion: file '{relevant_file}' not found in diff")
+                    continue
+                if relevant_lines_start < 1 or relevant_lines_end < relevant_lines_start:
+                    get_logger().warning(
+                        f"Skipping suggestion: invalid line range "
+                        f"{relevant_lines_start}-{relevant_lines_end} for '{relevant_file}'"
+                    )
                     continue
                 range = relevant_lines_end - relevant_lines_start # no need to add 1
                 body = body.replace('```suggestion', f'```suggestion:-0+{range}')

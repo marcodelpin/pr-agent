@@ -494,7 +494,7 @@ def handle_line_comments(body: Dict, comment_body: [str, Any]):
     if '/ask' in comment_body:
         # Build an argv list rather than concatenating into a shell-style
         # command string. PRAgent._handle_request() tokenises string requests
-        # with shlex.shlex after escaping single quotes, which neutralises any
+        # with single quotes treated literally, which neutralises any
         # shlex.quote() output and re-introduces the CLI-argument injection
         # vector (a quoted value containing whitespace splits into multiple
         # argv tokens). Passing a list bypasses the shlex path entirely.
@@ -556,10 +556,18 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
         return
     get_settings().set("config.is_auto_command", True)
     provider = _check_run_provider(api_url)
+    try:
+        command_provider = get_git_provider_with_context(pr_url=api_url)
+    except Exception as e:
+        get_logger().warning(f"Cannot access the GitHub provider for cache reset, {api_url=}: {e}")
+        command_provider = None
     succeeded = True
     for command in commands:
         check_run = None
         command_succeeded = True
+        # Clear only completed empty diffs at each command boundary.
+        if getattr(command_provider, "diff_files", None) == []:
+            command_provider.diff_files = None
         try:
             new_command = prepare_command(command)
             get_logger().info(f"{commands_conf}. Performing auto command '{new_command}', for {api_url=}")

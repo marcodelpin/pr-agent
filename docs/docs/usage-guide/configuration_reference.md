@@ -264,6 +264,7 @@ to-do list.
 | --- | --- | --- |
 | `num_code_suggestions_per_chunk` | 3 |  |
 | `max_suggestions_per_file` | 0 | Maximum suggestions retained per file after all chunks are merged; 0 disables the cap. Skip unresolvable line locations before applying a positive cap to summarized output; leave inline selection unchanged. |
+| `max_discussion_context_chars` | 24000 | Character budget for prior code-suggestion threads given to /improve as context (GitLab, Azure DevOps); 0 disables it. |
 | `max_number_of_calls` | 3 |  |
 | `parallel_calls` | true |  |
 | `decouple_hunks` | false |  |
@@ -362,6 +363,7 @@ _This section only documents commented-out examples; see the [TOML source](https
 | `expand_submodule_diffs` | false |  |
 | `feedback_on_draft_pr` | false |  |
 | `publish_review_as_thread` | false | Post the /review summary as a resolvable thread (discussion) instead of a plain note. |
+| `reply_to_trigger_comment` | false | On GitLab, reply to the triggering note's discussion for `/review` and `/improve` output when a discussion ID is available. |
 | `publish_improve_as_thread` | false | Post the /improve suggestions comment as a resolvable thread (discussion) instead of a plain note. |
 | `publish_code_suggestions_as_review` | false | When pr_code_suggestions.commitable_code_suggestions is true, queue each suggestion as a GitLab draft note and publish them all together in one batch (like GitLab's own "start a review" flow) instead of posting each as its own live discussion - and its own notification - as soon as it's created. |
 | `resolve_outdated_inline_threads` | false | Resolve the bot's own inline threads that a later push left on an outdated diff version. |
