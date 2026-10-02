@@ -1,5 +1,6 @@
 import difflib
 import json
+import math
 import re
 from types import SimpleNamespace
 from typing import Optional, Tuple
@@ -9,15 +10,33 @@ import requests
 from atlassian.bitbucket import Cloud
 from starlette_context import context
 
-from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
-
 from ..algo.file_filter import filter_ignored
 from ..algo.language_handler import is_valid_file
+from ..algo.types import EDIT_TYPE, FilePatchInfo
 from ..algo.utils import find_line_number_of_relevant_line_in_file
 from ..config_loader import get_settings, get_verbosity_level
 from ..log import get_logger
 from .diff_parsing import to_hunk_only_patch
-from .git_provider import MAX_FILES_ALLOWED_FULL, FileContentSnapshot, GitProvider, redact_credentials
+from .git_provider import (
+    MAX_FILES_ALLOWED_FULL,
+    FileContentSnapshot,
+    GitProvider,
+    IncompleteBitbucketPullRequestFilesError,
+    redact_credentials,
+)
+
+
+def _get_identity_request_timeout() -> float:
+    timeout = get_settings().get("bitbucket.identity_request_timeout")
+    if isinstance(timeout, bool):
+        raise ValueError("bitbucket.identity_request_timeout must be a positive finite number")
+    try:
+        timeout = float(timeout)
+    except (OverflowError, TypeError, ValueError):
+        raise ValueError("bitbucket.identity_request_timeout must be a positive finite number") from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("bitbucket.identity_request_timeout must be a positive finite number")
+    return timeout
 
 
 def _gef_filename(diff):
@@ -304,7 +323,9 @@ class BitbucketProvider(GitProvider):
             diff_split = [diff_split[i] for i in range(len(diff_split)) if diffs_original[i] in diffs]
         if len(diff_split) != len(diffs):
             get_logger().error(f"Error - failed to split the diff into {len(diffs)} parts")
-            return []
+            raise IncompleteBitbucketPullRequestFilesError(
+                "Bitbucket aggregate diff does not match its changed-file inventory"
+            )
         # Bitbucket headers vary by change type and may include mode or rename
         # metadata. Keep only the unified-diff hunks consumed downstream.
         for i, patch in enumerate(diff_split):
@@ -521,6 +542,7 @@ class BitbucketProvider(GitProvider):
         return True
 
     def get_line_link(self, relevant_file: str, relevant_line_start: int, relevant_line_end: int = None) -> str:
+        relevant_file = quote(relevant_file, safe="/")
         if relevant_line_start == -1:
             link = f"{self.pr_url}/#L{relevant_file}"
         else:
@@ -581,6 +603,39 @@ class BitbucketProvider(GitProvider):
 
     def get_user_id(self):
         return 0
+
+    def _get_authenticated_account_id(self) -> str:
+        agent_account_id = getattr(self, "_agent_account_id", None)
+        if isinstance(agent_account_id, str) and agent_account_id.strip():
+            return agent_account_id
+
+        response = requests.request(
+            "GET",
+            "https://api.bitbucket.org/2.0/user",
+            headers=self.headers,
+            timeout=_get_identity_request_timeout(),
+        )
+        response.raise_for_status()
+        account_data = response.json()
+        agent_account_id = account_data.get("account_id") if isinstance(account_data, dict) else None
+        if not isinstance(agent_account_id, str) or not agent_account_id.strip():
+            raise RuntimeError("Bitbucket authenticated account cannot be verified")
+        self._agent_account_id = agent_account_id
+        return agent_account_id
+
+    def is_comment_authored_by_pr_agent(self, comment) -> bool:
+        """Verify a Bitbucket Cloud comment belongs to this authenticated account."""
+        cloud_comment = self._get_cloud_comment(comment)
+        comment_data = cloud_comment if isinstance(cloud_comment, dict) else getattr(cloud_comment, "data", None)
+        if not isinstance(comment_data, dict):
+            raise RuntimeError("Bitbucket comment author cannot be verified")
+        author = comment_data.get("user") or comment_data.get("author")
+        comment_account_id = author.get("account_id") if isinstance(author, dict) else None
+        if not isinstance(comment_account_id, str) or not comment_account_id.strip():
+            raise RuntimeError("Bitbucket comment author cannot be verified")
+
+        agent_account_id = self._get_authenticated_account_id()
+        return comment_account_id.casefold() == agent_account_id.casefold()
 
     def get_issue_comments(self):
         comments = []

@@ -27,7 +27,8 @@ CHANGELOG_LINES = 50
 # A whole answer wrapped in one fenced block, e.g. "```markdown\n...\n```". The opening fence
 # is optional: the prompt ends with a dangling open "```markdown", which primes the model to
 # answer with a closing fence and no opening one.
-_WRAPPING_CODE_FENCE_RE = re.compile(r"\A\s*(?:```[^\n]*\n)?(?P<body>.*?)\n?```\s*\Z", re.DOTALL)
+_WRAPPING_CODE_FENCE_RE = re.compile(r"\A(?:\s*(?P<open>```[^\n]*\n))?(?P<body>.*?)\n?```\s*\Z", re.DOTALL)
+_FENCE_LINE_RE = re.compile(r"(?m)^[^\S\n]*```")
 
 
 def strip_wrapping_code_fence(text: str) -> str:
@@ -36,9 +37,17 @@ def strip_wrapping_code_fence(text: str) -> str:
     `str.strip("`")` would remove characters rather than the fence, so an entry ending in an
     inline code span (`` - Handle `None` in `parse()` ``) loses its closing backtick and the
     corrupted line is committed to CHANGELOG.md.
+
+    The function is idempotent, because the answer is stripped once when the model replies and
+    again before the changelog is built. Whether a trailing fence is a wrapper or the closer of a
+    code block the entry ends with comes down to whether the rest of the text is balanced: a
+    leftover fence either unterminates the block, or leaves a wrapper behind that then swallows
+    the rest of CHANGELOG.md when the file is committed.
     """
     match = _WRAPPING_CODE_FENCE_RE.match(text)
-    return match.group("body") if match else text
+    if match and (match.group("open") or len(_FENCE_LINE_RE.findall(match.group("body"))) % 2 == 0):
+        return match.group("body")
+    return text
 
 
 class PRUpdateChangelog:

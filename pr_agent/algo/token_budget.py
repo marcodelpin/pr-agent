@@ -580,9 +580,12 @@ class AttemptTokenBudget:
         if callable(encode) and callable(decode):
             encoded = encode(optional_text, disallowed_special=())
 
+            # A multi-byte character can span several BPE tokens, so cutting the
+            # token list can end mid-character; drop the dangling bytes instead
+            # of decoding them into U+FFFD replacement characters in the prompt.
             def retain(count: int) -> str:
                 retained = encoded[-count:] if keep == "suffix" else encoded[:count]
-                return decode(retained)
+                return decode(retained, errors="ignore")
         else:
             encoded = list(optional_text)
 

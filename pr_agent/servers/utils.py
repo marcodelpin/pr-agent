@@ -25,7 +25,7 @@ _PLAIN_PR_COMMANDS = ("/describe", "/review", "/improve")
 _COMMITTABLE_PR_COMMANDS = (
     "/describe --pr_description.final_update_message=false",
     "/review",
-    "/improve --pr_code_suggestions.commitable_code_suggestions=true",
+    "/improve --pr_code_suggestions.committable_code_suggestions=true",
 )
 _DEFAULT_PR_COMMANDS_BY_PROVIDER = {
     "github_app": _STANDARD_PR_COMMANDS,
@@ -47,6 +47,11 @@ def is_command_comment(body) -> bool:
     tool, because the dispatcher strips an optional leading slash.
     """
     return isinstance(body, str) and body.lstrip().startswith("/")
+
+
+def is_ask_command_comment(body) -> bool:
+    """Return True when a comment body starts with the /ask command."""
+    return isinstance(body, str) and body.lstrip().startswith("/ask")
 
 
 def get_pr_commands(provider: str) -> Sequence[str]:

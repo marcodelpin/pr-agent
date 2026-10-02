@@ -698,7 +698,7 @@ class GitLabProvider(GitProvider):
     _SUGGESTIONS_STABLE_ANCHORS = (
         PRCodeSuggestionsIdentity.SUMMARY.value,
         PRCodeSuggestionsIdentity.NO_SUGGESTIONS.value,
-        "**Suggestion:**",  # commitable-suggestions inline mode
+        "**Suggestion:**",  # committable-suggestions inline mode
     )
     _SUGGESTIONS_LEGACY_ANCHORS = (PRCodeSuggestionsHeader.SUMMARY.value,)
     _INCREMENTAL_ANCHOR_PREFIXES = {
@@ -1016,12 +1016,24 @@ class GitLabProvider(GitProvider):
                     raise
                 if expected_snapshot.exists:
                     raise ConcurrentFileUpdateError("The file disappeared after the changelog snapshot") from e
-                project.files.create({
-                    'file_path': file_path,
-                    'branch': branch,
-                    'content': contents,
-                    'commit_message': message
-                })
+                try:
+                    project.files.create({
+                        'file_path': file_path,
+                        'branch': branch,
+                        'content': contents,
+                        'commit_message': message
+                    })
+                except GitlabCreateError as create_error:
+                    error_message = str(getattr(create_error, "error_message", create_error)).strip().lower()
+                    if (getattr(create_error, "response_code", None) == 400
+                            and error_message == "a file with this name already exists"):
+                        get_logger().warning(
+                            f"Concurrent changelog creation rejected for file {file_path} in branch {branch}"
+                        )
+                        raise ConcurrentFileUpdateError(
+                            "The file appeared after the changelog snapshot"
+                        ) from create_error
+                    raise
                 get_logger().debug(f"Created file {file_path} in branch {branch}")
             else:
                 if not expected_snapshot.exists:
@@ -2421,19 +2433,20 @@ class GitLabProvider(GitProvider):
 
     def get_line_link(self, relevant_file: str, relevant_line_start: int, relevant_line_end: int = None) -> str:
         project_web_url = self._get_project_web_url()
+        encoded_file = quote(relevant_file, safe="/")
         relevant_line_start, relevant_line_end = self._normalize_line_range(
             relevant_line_start, relevant_line_end
         )
         if relevant_line_start == -1:
-            link = f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{relevant_file}?ref_type=heads"
+            link = f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{encoded_file}?ref_type=heads"
         elif relevant_line_end:
             link = (
-                f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{relevant_file}?ref_type=heads"
+                f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{encoded_file}?ref_type=heads"
                 f"#L{relevant_line_start}-{relevant_line_end}"
             )
         else:
             link = (
-                f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{relevant_file}?ref_type=heads"
+                f"{project_web_url}/-/blob/{quote(self.mr.source_branch)}/{encoded_file}?ref_type=heads"
                 f"#L{relevant_line_start}"
             )
         return link
