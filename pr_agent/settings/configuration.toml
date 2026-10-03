@@ -114,9 +114,11 @@ additional_reasoning_effort_models = []
 # here when litellm reports temperature as supported but the provider rejects it, or
 # when an OpenAI-compatible endpoint accepts but you still want it dropped. Adaptive-thinking
 # Claude models (Opus 4.7/4.8 and Opus/Sonnet/Fable 5) never receive temperature.
-# Model IDs match exactly or through any provider prefix. The defaults below preserve
-# the former static registry entries that litellm's metadata still marks
-# temperature-capable; the probe diff for this change is posted on the issue.
+# Match model IDs exactly or through any provider prefix. For OpenRouter `:nitro`
+# and `:floor` routing shortcuts, also match the suffix-free base ID (for example,
+# match `future-model` to `openrouter/vendor/future-model:nitro`). Keep other model
+# variants at their full ID. Preserve the former static registry entries below when
+# litellm's metadata still marks them temperature-capable; see the issue for the probe diff.
 no_temperature_models = ["deepseek/deepseek-reasoner", "o1-mini", "o1-mini-2024-09-12", "o1", "o1-2024-12-17", "o3-mini", "o3-mini-2025-01-31", "o3", "o3-2025-04-16", "o4-mini", "o4-mini-2025-04-16", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.2-codex", "gpt-5.3-codex", "gpt-5-mini"]
 # extended thinking for Claude reasoning models
 enable_claude_extended_thinking = false # Set to true to enable extended thinking feature
@@ -172,6 +174,9 @@ persistent_comment=true
 # Visible base heading for full and incremental review comments. Identity is tracked separately.
 review_heading = "PR Reviewer Guide"
 persistent_finding_state=true # Persist review finding state across complete review runs.
+# Character budget for the findings stored by earlier reviews, given to /review as context so it keeps their wording
+# instead of re-raising them reworded (needs persistent_finding_state); 0 disables it.
+max_previous_findings_chars = 8000
 
 inline_key_issues=false # Publish each review finding as an inline comment where the provider can verify inline-comment publication (GitHub, Bitbucket Cloud, Azure DevOps, GitLab).
 extra_instructions = ""
@@ -265,8 +270,8 @@ decouple_hunks = false
 # self-review checkbox
 demand_code_suggestions_self_review=false # add a checkbox for the author to self-review the code suggestions
 code_suggestions_self_review_text= "**Author self-review**: I have reviewed the PR code suggestions, and addressed the relevant ones."
-approve_pr_on_self_review=false # if true, the PR will be auto-approved after the author clicks on the self-review checkbox
-fold_suggestions_on_self_review=true # if true, the code suggestions will be folded after the author clicks on the self-review checkbox
+approve_pr_on_self_review=false # no effect: the self-review checkbox is a visual marker only, and PR-Agent does not approve PRs (see the improve docs and the FAQ)
+fold_suggestions_on_self_review=true # no effect: the self-review checkbox is a visual marker only, and suggestions are not folded when it is ticked
 
 [pr_add_docs] # /add_docs #
 extra_instructions = ""
@@ -354,7 +359,7 @@ feedback_on_draft_pr = false
 publish_review_as_thread = false
 # Post the /improve suggestions comment as a resolvable thread (discussion) instead of a plain note.
 publish_improve_as_thread = false
-# Reply to the triggering GitLab note's discussion for /review and /improve output.
+# On GitLab, reply to the triggering note's discussion for `/review` and `/improve` output when a discussion ID is available.
 reply_to_trigger_comment = false
 # When pr_code_suggestions.committable_code_suggestions is true, queue each suggestion as a GitLab draft
 # note and publish them all together in one batch (like GitLab's own "start a review" flow) instead of
@@ -491,11 +496,11 @@ allow_fallbacks = true # when provider_order is set, allow routing beyond the li
 # OpenRouter normalizes "max" to "xhigh" for LiteLLM/OpenRouter compatibility.
 # Model-specific support varies; mandatory reasoning models reject "none".
 reasoning_effort = ""
-# A positive value overrides global effort and non-none OpenRouter-specific efforts.
-# Explicit openrouter.reasoning_effort = "none" keeps reasoning disabled, except on
-# Grok 4.5/4.6: there "none" is clamped to the lowest supported
-# effort first, so a positive budget wins over it.
-# Some providers require max_tokens to be greater than the reasoning budget.
+# Use a positive value to override global effort and non-none OpenRouter-specific efforts.
+# Keep reasoning disabled for explicit openrouter.reasoning_effort = "none", except on
+# Grok 4.5/4.6 and Gemini 3.7/3.8 Flash. Clamp "none" to the lowest supported effort
+# there before applying the budget, so a positive budget wins.
+# Keep max_tokens greater than the reasoning budget where the provider requires it.
 reasoning_max_tokens = 0
 max_tokens = 0 # hard cap on completion tokens for the request; 0 = unset
 

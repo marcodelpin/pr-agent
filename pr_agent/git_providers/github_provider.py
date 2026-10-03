@@ -7,7 +7,6 @@ import os
 import re
 import time
 import traceback
-from datetime import datetime
 from typing import Optional, Tuple
 from urllib.parse import quote, urlparse
 
@@ -387,6 +386,7 @@ class GithubProvider(GitProvider):
             try:
                 diff_files = context.get("diff_files", None)
                 if diff_files:
+                    self.filtered_diff_file_names = context.get("filtered_diff_file_names", [])
                     return diff_files
             except ContextDoesNotExistError:
                 # Skip the per-request cache outside a request cycle; fall through and compute the files.
@@ -504,9 +504,11 @@ class GithubProvider(GitProvider):
             if invalid_files_names:
                 get_logger().info(f"Filtered out files with invalid extensions: {invalid_files_names}")
 
+            self.filtered_diff_file_names = invalid_files_names
             self.diff_files = diff_files
             try:
                 context["diff_files"] = diff_files
+                context["filtered_diff_file_names"] = invalid_files_names
             except ContextDoesNotExistError:
                 # Skip caching outside a request cycle; the value is already on self.
                 pass
@@ -1291,15 +1293,6 @@ class GithubProvider(GitProvider):
                 get_logger().warning(f"Could not read the login from the user payload: {e}")
         return self.github_user_id
 
-    def get_notifications(self, since: datetime):
-        deployment_type = get_settings().get("GITHUB.DEPLOYMENT_TYPE", "user")
-
-        if deployment_type != 'user':
-            raise ValueError("Deployment mode must be set to 'user' to get notifications")
-
-        notifications = self.github_client.get_user().get_notifications(since=since)
-        return notifications
-
     def get_issue_comments(self):
         return self.pr.get_issue_comments()
 
@@ -2020,8 +2013,9 @@ class GithubProvider(GitProvider):
             for sub_issue in nodes:
                 if not sub_issue:
                     continue
-                if "url" in sub_issue:
-                    sub_issues.add(sub_issue["url"])
+                url = sub_issue.get("url") if isinstance(sub_issue, dict) else None
+                if isinstance(url, str) and url.strip():
+                    sub_issues.add(url)
 
         except (GithubException, RequestException, ValueError, AttributeError, KeyError, TypeError) as e:
             # Cover json.JSONDecodeError through ValueError, and a payload that parses but is not a

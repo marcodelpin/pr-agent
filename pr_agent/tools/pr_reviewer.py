@@ -32,6 +32,7 @@ from pr_agent.algo.pr_processing import (
     FallbackEligibleError,
     PreparedPRDiff,
     add_ai_metadata_to_diff_files,
+    append_filtered_file_names,
     get_pr_diff,
     get_pr_multi_diffs,
     retry_with_fallback_models,
@@ -42,6 +43,7 @@ from pr_agent.algo.review_finding_state import (
     append_review_state,
     parse_review_state,
     reconcile_review_findings,
+    render_previous_findings,
 )
 from pr_agent.algo.review_merge import merge_review_chunks
 from pr_agent.algo.run_details import get_run_details, init_run_details, record_command_failure, record_model_used
@@ -208,6 +210,7 @@ class PRReviewer:
         self._review_state_block_reason = None
         self._review_finding_previous_state = None
         self._review_state_preserved = False
+        previous_findings = self._load_previous_findings_context()
         question_str, answer_str = self._get_user_answers()
         self.pr_description, self.pr_description_files = (
             self.git_provider.get_pr_description(split_changes_walkthrough=True))
@@ -245,6 +248,7 @@ class PRReviewer:
             "extra_instructions": get_settings().pr_reviewer.extra_instructions,
             "skills_context": get_skills_context(),
             "repo_context": build_repo_context(self.git_provider),
+            "previous_findings": previous_findings,
             "commit_messages_str": self.git_provider.get_commit_messages(),
             "custom_labels": "",
             "enable_custom_labels": get_settings().config.enable_custom_labels,
@@ -295,6 +299,9 @@ class PRReviewer:
                 # If the gate disabled incremental (e.g., commits_range is None), fall through to full review.
                 if not can_run and self.incremental.is_incremental:
                     return None
+                if not self.incremental.is_incremental:
+                    # Reload the findings the incremental mode left out, for the fallback full review.
+                    self.vars["previous_findings"] = self._load_previous_findings_context()
 
             # if isinstance(self.args, list) and self.args and self.args[0] == 'auto_approve':
             #     get_logger().info(f'Auto approve flow PR: {self.pr_url} ...')
@@ -641,6 +648,21 @@ class PRReviewer:
         self._review_state_block_reason = None
         return parse_review_state("")
 
+    def _load_previous_findings_context(self) -> str:
+        """Return the findings stored by earlier reviews as a JSON block for the prompt, or ""."""
+        value = get_settings().pr_reviewer.get("max_previous_findings_chars", 8000)
+        try:
+            max_chars = int(value)
+        except (TypeError, ValueError, OverflowError):
+            get_logger().warning(f"Invalid pr_reviewer.max_previous_findings_chars: {value!r}")
+            return ""
+        if max_chars <= 0 or not self._review_finding_state_enabled():
+            return ""
+        parsed = self._load_review_finding_state()
+        if parsed is None or not parsed.valid:
+            return ""
+        return render_previous_findings(parsed.state, max_chars)
+
     @staticmethod
     def _review_finding_from_issue(issue: dict) -> Optional[dict]:
         if not isinstance(issue, dict):
@@ -816,15 +838,29 @@ class PRReviewer:
             ai_handler, "get_output_token_reserve", None
         )
         if raw_prompt_vars is not None:
-            self.vars, self.token_handler = fit_related_tickets_to_prompt_budget(
-                self.git_provider.pr,
-                raw_prompt_vars,
-                get_settings().pr_review_prompt.system,
-                get_settings().pr_review_prompt.user,
-                model,
-                ai_handler=ai_handler,
-                output_token_reserve=output_token_reserve,
-            )
+            try:
+                self.vars, self.token_handler = fit_related_tickets_to_prompt_budget(
+                    self.git_provider.pr,
+                    raw_prompt_vars,
+                    get_settings().pr_review_prompt.system,
+                    get_settings().pr_review_prompt.user,
+                    model,
+                    ai_handler=ai_handler,
+                    output_token_reserve=output_token_reserve,
+                )
+            except FallbackEligibleError:
+                if not raw_prompt_vars.get("previous_findings"):
+                    raise
+                get_logger().warning(f"Earlier findings do not fit the prompt budget for {model}, omitting them")
+                self.vars, self.token_handler = fit_related_tickets_to_prompt_budget(
+                    self.git_provider.pr,
+                    dict(raw_prompt_vars, previous_findings=""),
+                    get_settings().pr_review_prompt.system,
+                    get_settings().pr_review_prompt.user,
+                    model,
+                    ai_handler=ai_handler,
+                    output_token_reserve=output_token_reserve,
+                )
         chunking_enabled = get_settings().pr_reviewer.get("enable_large_pr_chunking", False)
         diff_kwargs = {
             "add_line_numbers_to_hunks": True,
@@ -879,6 +915,7 @@ class PRReviewer:
                 "max_calls": get_settings().pr_reviewer.get("max_number_of_calls", 3),
                 "add_line_numbers": True,
                 "return_remaining_files": True,
+                "include_filtered_file_names": False,
             }
             output_token_reserve = getattr(
                 getattr(self, "ai_handler", None), "get_output_token_reserve", None
@@ -903,8 +940,19 @@ class PRReviewer:
         get_logger().debug("PR diff chunks", artifact=patches_diff_list)
         chunk_results = getattr(self, "_chunked_results", {})
         pending_indices = [index for index in range(len(patches_diff_list)) if index not in chunk_results]
+        filtered_files = getattr(self.git_provider, "get_filtered_diff_file_names", lambda: [])()
+        if isinstance(filtered_files, (list, tuple)) and filtered_files:
+            attempt_budget = self._review_attempt_budget(model)
+            max_tokens = attempt_budget.token_handler.prompt_tokens + attempt_budget.available_tokens(
+                OUTPUT_BUFFER_TOKENS_HARD_THRESHOLD, preserve_minimum=True, clamp=False,
+            )
+            prompts = [append_filtered_file_names(
+                patches_diff_list[index], self.git_provider, attempt_budget.token_handler, max_tokens,
+            ) for index in pending_indices]
+        else:
+            prompts = [patches_diff_list[index] for index in pending_indices]
         predictions = await asyncio.gather(
-            *[self._get_prediction(model, patches_diff_list[index]) for index in pending_indices],
+            *[self._get_prediction(model, prompt) for prompt in prompts],
             return_exceptions=True)
 
         chunk_errors = []

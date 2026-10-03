@@ -26,6 +26,7 @@ from pr_agent.algo.pr_processing import (
     FallbackEligibleError,
     _get_all_models,
     add_ai_metadata_to_diff_files,
+    append_filtered_file_names,
     get_effective_fallback_chain,
     get_pr_diff,
     get_pr_multi_diffs,
@@ -1998,7 +1999,8 @@ class PRCodeSuggestions:
                 self.git_provider, attempt_token_handler, model,
                 max_calls=get_settings().pr_code_suggestions.max_number_of_calls,
                 add_line_numbers=True, return_remaining_files=True,
-                output_token_reserve=output_token_reserve)  # decouple hunk with line numbers
+                output_token_reserve=output_token_reserve,
+                include_filtered_file_names=False)  # decouple hunk with line numbers
             self.patches_diff_list_no_line_numbers = self.remove_line_numbers(self.patches_diff_list)  # decouple hunk
 
         else:
@@ -2007,7 +2009,8 @@ class PRCodeSuggestions:
                 self.git_provider, attempt_token_handler, model,
                 max_calls=get_settings().pr_code_suggestions.max_number_of_calls,
                 add_line_numbers=False, return_remaining_files=True,
-                output_token_reserve=output_token_reserve)
+                output_token_reserve=output_token_reserve,
+                include_filtered_file_names=False)
             self.patches_diff_list = await self.convert_to_decoupled_with_line_numbers(
                 self.patches_diff_list_no_line_numbers,
                 model,
@@ -2019,8 +2022,23 @@ class PRCodeSuggestions:
                     self.git_provider, attempt_token_handler, model,
                     max_calls=get_settings().pr_code_suggestions.max_number_of_calls,
                     add_line_numbers=True, return_remaining_files=True,
-                    output_token_reserve=output_token_reserve)  # decouple hunk with line numbers
+                    output_token_reserve=output_token_reserve,
+                    include_filtered_file_names=False)  # decouple hunk with line numbers
                 self.patches_diff_list_no_line_numbers = self.remove_line_numbers(self.patches_diff_list)
+
+        filtered_files = getattr(self.git_provider, "get_filtered_diff_file_names", lambda: [])()
+        if self.patches_diff_list and isinstance(filtered_files, (list, tuple)) and filtered_files:
+            max_tokens = attempt_token_handler.prompt_tokens + self._suggestion_attempt_budget.available_tokens(
+                OUTPUT_BUFFER_TOKENS_HARD_THRESHOLD, preserve_minimum=True, clamp=False,
+            )
+            self.patches_diff_list = [
+                append_filtered_file_names(chunk, self.git_provider, attempt_token_handler, max_tokens)
+                for chunk in self.patches_diff_list
+            ]
+            self.patches_diff_list_no_line_numbers = [
+                append_filtered_file_names(chunk, self.git_provider, attempt_token_handler, max_tokens)
+                for chunk in self.patches_diff_list_no_line_numbers
+            ]
 
         if self.patches_diff_list:
             get_logger().info(f"Number of PR chunk calls: {len(self.patches_diff_list)}")
@@ -2175,12 +2193,11 @@ class PRCodeSuggestions:
 
             # sort suggestions_labels by the suggestion with the highest score
             suggestions_labels = dict(
-                sorted(suggestions_labels.items(), key=lambda x: max([s['score'] for s in x[1]]), reverse=True))
+                sorted(suggestions_labels.items(), key=lambda x: max(s['score'] for s in x[1]), reverse=True))
             # sort the suggestions inside each label group by score
             for label, suggestions in suggestions_labels.items():
                 suggestions_labels[label] = sorted(suggestions, key=lambda x: x['score'], reverse=True)
 
-            counter_suggestions = 0
             for label, suggestions in suggestions_labels.items():
                 num_suggestions = len(suggestions)
                 pr_body += f"""<tr><td rowspan={num_suggestions}>{label.capitalize()}</td>\n"""
@@ -2189,7 +2206,6 @@ class PRCodeSuggestions:
                     relevant_file = suggestion['relevant_file'].strip()
                     relevant_lines_start = int(suggestion['relevant_lines_start'])
                     relevant_lines_end = int(suggestion['relevant_lines_end'])
-                    range_str = ""
                     if relevant_lines_start == relevant_lines_end:
                         range_str = f"[{relevant_lines_start}]"
                     else:
@@ -2258,7 +2274,6 @@ class PRCodeSuggestions:
                     pr_body += f"</td><td align=center>{score_str}\n\n"
 
                     pr_body += "</td></tr>"
-                    counter_suggestions += 1
 
                 # pr_body += "</details>"
                 # pr_body += """</td></tr>"""
