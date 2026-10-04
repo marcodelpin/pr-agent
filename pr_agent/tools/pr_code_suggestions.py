@@ -56,7 +56,12 @@ from pr_agent.git_providers.git_provider import (
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
 from pr_agent.tools.pr_description import insert_br_after_x_chars
-from pr_agent.tools.progress_comment import build_progress_comment
+from pr_agent.tools.progress_comment import (
+    ChunkProgressReporter,
+    build_progress_comment,
+    edit_comment_safely,
+    supports_editable_progress_comment,
+)
 
 # TODO: in 1.0, remove the deprecated "commitable_code_suggestions" fallback in
 # get_committable_code_suggestions() below, its entry in
@@ -81,6 +86,51 @@ def get_suggestions_score_threshold() -> int:
 
 def get_dual_publishing_score_threshold() -> int:
     return _as_threshold("pr_code_suggestions.dual_publishing_score_threshold", 0, 0)
+
+
+_REFLECTION_FAILURE_SCORE_WHY = "Self-reflection unavailable; score not model-assigned"
+
+
+def get_reflection_failure_score() -> int:
+    """Score for suggestions the model never vetted because self-reflection was unavailable.
+
+    Clamped at 0 and defaults to 7 so a malformed value cannot fail the run. Setting it below
+    pr_code_suggestions.suggestions_score_threshold drops those unvetted suggestions.
+    """
+    return _as_threshold("pr_code_suggestions.score_on_reflection_failure", 7, 0)
+
+
+def apply_reflection_failure_score(suggestions: List[Dict]) -> None:
+    """Assign the configured fallback score and mark it as not model-assigned."""
+    score = get_reflection_failure_score()
+    for suggestion in suggestions:
+        suggestion["score"] = score
+        suggestion["score_why"] = _REFLECTION_FAILURE_SCORE_WHY
+
+
+def filter_suggestions_by_score_threshold(suggestions: List[Dict], call_index: int = 0) -> List[Dict]:
+    """Keep suggestions scored at or above pr_code_suggestions.suggestions_score_threshold.
+
+    A suggestion whose score cannot be read is dropped, as before.
+    """
+    score_threshold = get_suggestions_score_threshold()
+    kept = []
+    for i, suggestion in enumerate(suggestions):
+        try:
+            score = int(suggestion.get("score", 1))
+        except Exception as e:
+            get_logger().error(
+                f"Error getting PR diff for suggestion {i} in call {call_index}, error: {e}",
+                artifact={"prediction": suggestion})
+            continue
+        if score >= score_threshold:
+            kept.append(suggestion)
+        else:
+            get_logger().info(
+                f"Removing suggestions {i} from call {call_index}, because score is {score}, "
+                f"and score_threshold is {score_threshold}",
+                artifact=suggestion)
+    return kept
 
 
 def get_committable_code_suggestions() -> bool:
@@ -153,6 +203,9 @@ def render_suggestions_markdown(data: dict) -> str:
         summary = str(suggestion.get("one_sentence_summary") or suggestion.get("suggestion_content") or "").strip()
         if summary:
             lines.append(summary)
+        score_why = str(suggestion.get("score_why") or "").strip()
+        if score_why:
+            lines.append(f"Why: {score_why}")
         lines.append("")
     if not lines:
         return "## PR Code Suggestions\n\nNo suggestions to report."
@@ -173,20 +226,11 @@ def _supports_persistent_progress_comment(git_provider) -> bool:
     and can do neither; persisting the progress there would leak a stale "Preparing
     suggestions..." document ahead of the final result.
     """
-    return (git_provider.is_supported("edit_comment")
-            and git_provider.is_supported("remove_comment"))
+    return supports_editable_progress_comment(git_provider)
 
 
 def _edit_comment_safely(git_provider, comment, body: str) -> bool:
-    try:
-        result = git_provider.edit_comment(comment, body)
-    except Exception as error:
-        get_logger().warning(f"Failed to edit code suggestions comment: {error}")
-        return False
-    if result is False:
-        get_logger().warning("Failed to edit code suggestions comment")
-        return False
-    return True
+    return edit_comment_safely(git_provider, comment, body, label="code suggestions")
 
 
 class PRCodeSuggestions:
@@ -279,6 +323,9 @@ class PRCodeSuggestions:
 
         self.progress = build_progress_comment()
         self.progress_response = None
+        # The body actually published above; chunk progress is appended to it in place.
+        self._progress_base_body = None
+        self._chunk_progress = None
 
     def _load_suggestion_discussion_context(self) -> str:
         if not _supports_code_suggestion_state(self.git_provider):
@@ -315,6 +362,8 @@ class PRCodeSuggestions:
     async def run(self):
         init_run_details()
         self._output_published = False
+        self._progress_base_body = None
+        self._chunk_progress = None
         try:
             if _supports_code_suggestion_state(self.git_provider):
                 try:
@@ -353,6 +402,7 @@ class PRCodeSuggestions:
                     # so it must already be a thread when threaded output is requested. Output-only
                     # providers (plain-diff) cannot edit or remove it afterwards, so for those the
                     # progress is a temporary placeholder that is never persisted.
+                    self._progress_base_body = self.progress
                     if _supports_persistent_progress_comment(self.git_provider):
                         self.progress_response = self.git_provider.publish_comment(self.progress,
                                                                                    **self._improve_thread_kwargs())
@@ -360,8 +410,9 @@ class PRCodeSuggestions:
                         self.progress_response = self.git_provider.publish_comment(
                             self.progress, is_temporary=True, **self._improve_thread_kwargs())
                 else:
+                    self._progress_base_body = "Preparing suggestions..."
                     self.progress_response = self.git_provider.publish_comment(
-                        "Preparing suggestions...", is_temporary=True)
+                        self._progress_base_body, is_temporary=True)
 
             # # call the model to get the suggestions, and self-reflect on them
             # if not self.is_extended:
@@ -1002,10 +1053,10 @@ class PRCodeSuggestions:
         if response_reflect:
             await self.analyze_self_reflection_response(data, response_reflect)
         else:
-            get_logger().warning("Could not self-reflect on suggestions; using default score 7")
-            for suggestion in data["code_suggestions"]:
-                suggestion["score"] = 7
-                suggestion["score_why"] = ""
+            score_on_failure = get_reflection_failure_score()
+            get_logger().warning(
+                f"Could not self-reflect on suggestions; using score {score_on_failure}")
+            apply_reflection_failure_score(data["code_suggestions"])
 
         return data
 
@@ -1048,15 +1099,17 @@ class PRCodeSuggestions:
         response_reflect_yaml = load_yaml(response_reflect)
         if not isinstance(response_reflect_yaml, dict):
             get_logger().warning(
-                "Self-reflection feedback was not a mapping; line anchors will not be resolved"
+                "Self-reflection feedback was not a mapping; applying the reflection-failure score"
             )
+            apply_reflection_failure_score(data["code_suggestions"])
             return
         code_suggestions_feedback = response_reflect_yaml.get("code_suggestions", [])
         if not isinstance(code_suggestions_feedback, list):
             get_logger().warning(
                 "Self-reflection feedback 'code_suggestions' was not a list; "
-                "line anchors will not be resolved"
+                "applying the reflection-failure score"
             )
+            apply_reflection_failure_score(data["code_suggestions"])
             return
         if code_suggestions_feedback and len(code_suggestions_feedback) == len(data["code_suggestions"]):
             for i, suggestion in enumerate(data["code_suggestions"]):
@@ -1092,8 +1145,7 @@ class PRCodeSuggestions:
                     get_logger().error(f"Error processing suggestion score {i}",
                                        artifact={"suggestion": suggestion,
                                                  "code_suggestions_feedback": code_suggestions_feedback[i]})
-                    suggestion["score"] = 7
-                    suggestion["score_why"] = ""
+                    apply_reflection_failure_score([suggestion])
 
                 suggestion = self.validate_one_liner_suggestion_not_repeating_code(suggestion)
 
@@ -1113,8 +1165,9 @@ class PRCodeSuggestions:
         else:
             get_logger().warning(
                 f"Self-reflection feedback covered {len(code_suggestions_feedback)} suggestion(s) instead of "
-                f"{len(data['code_suggestions'])}; line anchors will not be resolved"
+                f"{len(data['code_suggestions'])}; applying the reflection-failure score"
             )
+            apply_reflection_failure_score(data["code_suggestions"])
 
     @staticmethod
     def _truncate_if_needed(suggestion):
@@ -1830,20 +1883,49 @@ class PRCodeSuggestions:
     async def _predict_chunks(self, model: str, chunk_pairs: list) -> list:
         if get_settings().pr_code_suggestions.parallel_calls:
             results = await asyncio.gather(
-                *[self._get_prediction(model, numbered, unnumbered) for numbered, unnumbered in chunk_pairs],
+                *[self._predict_chunk(model, numbered, unnumbered) for numbered, unnumbered in chunk_pairs],
                 return_exceptions=True,
             )
         else:
             results = []
             for numbered, unnumbered in chunk_pairs:
                 try:
-                    results.append(await self._get_prediction(model, numbered, unnumbered))
+                    results.append(await self._predict_chunk(model, numbered, unnumbered))
                 except Exception as error:
                     results.append(error)
         for result in results:
             if isinstance(result, BaseException) and not isinstance(result, Exception):
                 raise result
         return results
+
+    async def _predict_chunk(self, model: str, numbered: str, unnumbered: str):
+        """Suggest one chunk, then advance the in-place progress comment it was published under."""
+        try:
+            return await self._get_prediction(model, numbered, unnumbered)
+        finally:
+            progress = getattr(self, "_chunk_progress", None)
+            if progress is not None:
+                await progress.record_settled()
+
+    def _chunk_progress_reporter(self, total: int) -> ChunkProgressReporter | None:
+        """Report chunk progress by appending a line to the published progress comment in place.
+
+        A chunked run makes several model calls that can take minutes, so the placeholder stays
+        current. Returns None when no editable progress comment was published, or when the diff
+        yielded a single chunk, which has no progress worth an extra provider write. Both leave
+        the run with today's frozen placeholder.
+        """
+        base_body = getattr(self, "_progress_base_body", None)
+        if not base_body or total < 2:
+            return None
+        return ChunkProgressReporter.create(
+            self.git_provider,
+            self.progress_response,
+            base_body,
+            total=total,
+            body_builder=lambda line: f"{base_body}\n\n{line}",
+            label="code suggestions",
+        )
 
     def _recovery_chain(self, model: str, settings) -> Optional[tuple]:
         """Return the invocation-local fallback chain and current position after routing.
@@ -1950,6 +2032,12 @@ class PRCodeSuggestions:
                     continue
                 if not eligible:
                     continue
+                # Each round is extra work on top of the batch already reported as done, and a
+                # chunk dropped for token budget never settles, so only extend for the chunks
+                # actually about to be retried.
+                progress = getattr(self, "_chunk_progress", None)
+                if progress is not None:
+                    await progress.extend_total(len(eligible))
                 # Sibling calls have finished before the deployment switch above.
                 recovered = await self._predict_chunks(fallback_model, [chunk_pairs[index] for index in eligible])
                 for index, result in zip(eligible, recovered, strict=True):
@@ -1975,6 +2063,13 @@ class PRCodeSuggestions:
         self.total_chunk_count = 0
         self.parse_failure_count = 0
         self.remaining_files_list = []
+        # Each attempt owns a fresh reporter, so restore the placeholder before the next model
+        # prepares its chunks; otherwise the previous attempt's "N of N" line stays on screen
+        # until the new one settles its first chunk and rewinds it to 1.
+        previous_progress = getattr(self, "_chunk_progress", None)
+        self._chunk_progress = None
+        if previous_progress is not None:
+            await previous_progress.reset_to_base()
         output_token_reserve = getattr(self.ai_handler, "get_output_token_reserve", None)
         attempt_variables = copy.deepcopy(self.vars)
         attempt_variables["diff"] = ""
@@ -2049,6 +2144,7 @@ class PRCodeSuggestions:
             chunk_pairs = list(
                 zip(self.patches_diff_list, self.patches_diff_list_no_line_numbers, strict=True))
             self.total_chunk_count = len(chunk_pairs)
+            self._chunk_progress = self._chunk_progress_reporter(self.total_chunk_count)
 
             prediction_results = await self._predict_chunks(model, chunk_pairs)
             await self._recover_failed_chunks(model, chunk_pairs, prediction_results)
@@ -2063,6 +2159,8 @@ class PRCodeSuggestions:
                     prediction_list.append(prediction)
 
             self.failed_chunk_count = len(chunk_errors) + self.parse_failure_count
+            if self._chunk_progress is not None:
+                await self._chunk_progress.set_failed(self.failed_chunk_count)
             if chunk_errors and not prediction_list:
                 raise chunk_errors[0]
             self.prediction_list = prediction_list
@@ -2070,20 +2168,8 @@ class PRCodeSuggestions:
             data = {"code_suggestions": []}
             for j, predictions in enumerate(prediction_list):  # each call adds an element to the list
                 if "code_suggestions" in predictions:
-                    score_threshold = get_suggestions_score_threshold()
-                    for i, prediction in enumerate(predictions["code_suggestions"]):
-                        try:
-                            score = int(prediction.get("score", 1))
-                            if score >= score_threshold:
-                                data["code_suggestions"].append(prediction)
-                            else:
-                                get_logger().info(
-                                    f"Removing suggestions {i} from call {j}, because score is {score}, "
-                                    f"and score_threshold is {score_threshold}",
-                                    artifact=prediction)
-                        except Exception as e:
-                            get_logger().error(f"Error getting PR diff for suggestion {i} in call {j}, error: {e}",
-                                               artifact={"prediction": prediction})
+                    data["code_suggestions"].extend(
+                        filter_suggestions_by_score_threshold(predictions["code_suggestions"], j))
             data["code_suggestions"] = self._limit_suggestions_per_file(data["code_suggestions"])
             self.data = data
         else:
