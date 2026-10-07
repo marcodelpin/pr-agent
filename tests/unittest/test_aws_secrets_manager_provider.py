@@ -50,10 +50,20 @@ class TestAWSSecretsManagerProvider:
     # Negative test cases (following Google Cloud Storage pattern)
     def test_get_secret_failure(self):
         provider, mock_client = self._provider()
-        mock_client.get_secret_value.side_effect = Exception("AWS error")
+        error = ClientError({"Error": {"Code": "ResourceNotFoundException", "Message": "Not found"}}, "GetSecretValue")
+        mock_client.get_secret_value.side_effect = error
 
         result = provider.get_secret('nonexistent-secret')
-        assert result == ""  # Confirm empty string is returned
+        assert result == ""  # Confirm empty string is returned for missing secret
+
+    def test_get_secret_raises_on_non_not_found_error(self):
+        provider, mock_client = self._provider()
+        error = ClientError({"Error": {"Code": "AccessDeniedException", "Message": "Denied"}}, "GetSecretValue")
+        mock_client.get_secret_value.side_effect = error
+
+        with pytest.raises(ClientError) as caught:
+            provider.get_secret('some-secret')
+        assert caught.value is error
 
     def test_get_all_secrets_failure(self):
         provider, mock_client = self._provider()

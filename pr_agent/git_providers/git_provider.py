@@ -8,6 +8,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -24,6 +25,16 @@ from pr_agent.algo.types import FilePatchInfo
 from pr_agent.algo.utils import Range, process_description
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
+
+
+def cache_languages(get_languages):
+    """Cache non-empty language results per provider instance."""
+    @wraps(get_languages)
+    def wrapper(self):
+        if not getattr(self, "_languages", None):
+            self._languages = get_languages(self)
+        return self._languages
+    return wrapper
 
 
 def get_config_branch() -> str:
@@ -62,6 +73,11 @@ class CodeSuggestionThread:
     suggestion: str
     replies: list[tuple[str, str]] = field(default_factory=list)
     authored_by_agent: Optional[bool] = None
+
+    def text_replies(self) -> list[tuple[str, str]]:
+        """Return the replies that have a non-blank text message, stripped."""
+        return [(author, message.strip()) for author, message in self.replies
+                if isinstance(message, str) and message.strip()]
 
 
 def _discussion_context_budget() -> int:
@@ -325,8 +341,7 @@ class GitProvider(ABC):
         for thread in self._iter_code_suggestion_threads():
             if thread.authored_by_agent is False:
                 continue
-            replies = [(author, message.strip()) for author, message in thread.replies
-                       if isinstance(message, str) and message.strip()]
+            replies = thread.text_replies()
             discussion = {
                 "thread_id": thread.thread_id,
                 "status": thread.status,
@@ -347,7 +362,10 @@ class GitProvider(ABC):
         return context
 
     def _iter_code_suggestion_threads(self) -> Iterator[CodeSuggestionThread]:
-        """Yield prior code-suggestion threads, newest first. Providers with suggestion state override this."""
+        """Yield prior code-suggestion threads, newest first. Providers with suggestion state override this.
+
+        Inline /review key-issue threads carry the same dedup marker, so a provider may yield them too;
+        /review reads them to learn which findings a human resolved."""
         return iter(())
 
     def supports_threaded_pr_questions(self) -> bool:
@@ -806,6 +824,14 @@ class GitProvider(ABC):
 
     def get_repo_file_content(self, file_path: str, from_default_branch: bool = False):
         return ""
+
+    def get_issue_content(self, repo_obj, issue_number: int):
+        """Fetch issue content within this provider's authorized repository boundary."""
+        raise NotImplementedError("This provider cannot fetch GitHub issue content")
+
+    def get_sibling_repo(self, repo_id: str):
+        """Resolve a host-approved sibling repository the requester may read."""
+        return None
 
     def get_sibling_repo_file_content(self, repo_id: str, file_path: str, from_default_branch: bool = False):
         """Fetch a single file from a sibling repository in the same namespace/owner.

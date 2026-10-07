@@ -94,7 +94,7 @@ for the authoritative default values.
   </tr>
   <tr>
     <td><b>max_previous_findings_chars</b></td>
-    <td>Character budget for the findings stored by earlier reviews (requires <code>persistent_finding_state</code>). They are given to the model so it repeats a still-valid finding with its earlier wording instead of re-raising it reworded, and does not re-raise a resolved one unless the code reintroduces it. Set to 0 to disable. Default is 8000.</td>
+    <td>Character budget for the findings stored by earlier reviews (requires <code>persistent_finding_state</code>). They are given to the model so it repeats a still-valid finding with its earlier wording instead of re-raising it reworded, and does not re-raise a resolved one unless the code reintroduces it. On GitLab, an inline key-issue thread that someone other than PR-Agent resolved is given as dismissed, with its last reply, so the model does not re-raise it unless the code makes it worse. Set to 0 to disable. Default is 8000.</td>
   </tr>
   <tr>
   <td><b>final_update_message</b></td>
@@ -299,7 +299,9 @@ While the chunks run, the temporary `Preparing review...` comment is rewritten i
 number of chunks already analyzed, for example `Preparing review... analyzed 2 of 3 chunks`, plus
 `... 1 chunk failed` when a chunk gives up. The updates require
 `config.publish_output_progress` and a provider that supports both editing and removing a
-comment, so plain-diff runs and automatic commands keep the frozen placeholder. The comment stays
+comment, so plain-diff runs keep the frozen placeholder. Automatic commands publish no progress
+comment, but while `github.publish_as_check_run` is enabled their in-progress check run shows the
+same chunk count. The comment stays
 temporary and is still removed before the merged review is published. A fallback model restores
 the placeholder before it starts, so the visible count never moves backward.
 

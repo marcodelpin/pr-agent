@@ -3,9 +3,11 @@ import base64
 import binascii
 import copy
 import hashlib
+import hmac
 import json
 import math
 import os
+import re
 import time
 
 import jwt
@@ -41,6 +43,23 @@ router = APIRouter()
 validate_secret_provider_setting()
 
 _secret_provider_state = {}
+
+_CLIENT_KEY_RE = re.compile(r"^[a-zA-Z0-9_.:{}/@=-]+$")
+
+
+def _is_valid_client_key(client_key: str) -> bool:
+    """Validate clientKey shape before using it as a secret provider key."""
+    if not isinstance(client_key, str) or not client_key or len(client_key) > 256:
+        return False
+    if ".." in client_key:
+        return False
+    return bool(_CLIENT_KEY_RE.match(client_key))
+
+
+def _compute_qsh(method: str, path: str) -> str:
+    """Compute the Atlassian Connect qsh for a request that carries no query string."""
+    canonical_path = path.rstrip("/") or "/"
+    return hashlib.sha256(f"{method.upper()}&{canonical_path}&".encode("utf-8")).hexdigest()
 
 
 def _get_request_timeout():
@@ -315,28 +334,23 @@ async def handle_github_webhooks(background_tasks: BackgroundTasks, request: Req
             except Exception as e:
                 get_logger().error(f"Failed to look up Bitbucket shared secret: {e}")
                 return
-            # Atlassian Connect issues JWTs with aud == uri of the app descriptor.
-            # Pin the audience to the configured base_url so a forged JWT cannot
-            # satisfy the audience check by mirroring its own iss. Guard against
-            # the key being absent (it's not in the shipped .secrets_template.toml)
-            # so a missing-config deployment fails cleanly instead of raising
-            # AttributeError on every webhook and rejecting valid tokens.
             try:
-                expected_audience = get_settings().bitbucket.base_url
-            except AttributeError:
-                get_logger().error(
-                    "Bitbucket webhook JWT validation skipped: bitbucket.base_url is not configured"
+                decoded = jwt.decode(
+                    input_jwt,
+                    shared_secret,
+                    algorithms=["HS256"],
+                    options={"verify_aud": False},
                 )
-                return
-            if not expected_audience:
-                get_logger().error(
-                    "Bitbucket webhook JWT validation skipped: bitbucket.base_url is empty"
-                )
-                return
-            try:
-                jwt.decode(input_jwt, shared_secret, audience=expected_audience, algorithms=["HS256"])
             except jwt.InvalidTokenError as e:
                 get_logger().error(f"Bitbucket webhook JWT validation failed: {e}")
+                return
+            token_qsh = decoded.get("qsh")
+            if not token_qsh or not isinstance(token_qsh, str):
+                get_logger().error("Bitbucket webhook JWT is missing 'qsh' claim")
+                return
+            expected_qsh = _compute_qsh(method=request.method, path=request.url.path)
+            if not hmac.compare_digest(token_qsh, expected_qsh):
+                get_logger().error("Bitbucket webhook JWT validation failed: qsh mismatch")
                 return
             bearer_token = await get_bearer_token(shared_secret, client_key)
             context['bitbucket_bearer_token'] = bearer_token
@@ -408,12 +422,59 @@ async def handle_installed_webhooks(request: Request, response: Response):
     shared_secret = data["sharedSecret"]
     client_key = data["clientKey"]
     username = principal["username"]
+
+    if not _is_valid_client_key(client_key):
+        get_logger().error("Failed to register user: invalid clientKey format")
+        return JSONResponse({"error": "Unable to register user"}, status_code=500)
+
+    secret_provider = get_fork_safe_secret_provider()
+    if not secret_provider:
+        get_logger().error("Failed to register user: secret provider not configured")
+        return JSONResponse({"error": "Unable to register user"}, status_code=500)
+
+    # For a clientKey that already has an entry (re-installation), require a JWT
+    # signed with the currently stored secret (Atlassian's documented reinstall pattern).
+    if hasattr(secret_provider, "get_secret"):
+        try:
+            raw_secret = secret_provider.get_secret(client_key)
+        except Exception as e:
+            get_logger().error(f"Failed to check existing secret for clientKey: {type(e).__name__}")
+            return JSONResponse({"error": "Unable to verify existing installation"}, status_code=500)
+
+        if raw_secret:
+            try:
+                existing_secret_data = json.loads(raw_secret)
+                existing_shared_secret = existing_secret_data["shared_secret"]
+            except Exception as e:
+                get_logger().error(
+                    f"Bitbucket re-installation rejected: stored secret is malformed ({type(e).__name__})"
+                )
+                return JSONResponse({"error": "Unable to verify existing installation"}, status_code=500)
+
+            jwt_header = request.headers.get("authorization", None)
+            jwt_parts = jwt_header.split() if jwt_header else []
+            if len(jwt_parts) != 2 or jwt_parts[0].casefold() != "jwt":
+                get_logger().error("Bitbucket re-installation rejected: missing or malformed authorization header")
+                return JSONResponse({"error": "Unauthorized re-installation"}, status_code=401)
+            reinstall_jwt = jwt_parts[1]
+            try:
+                jwt.decode(
+                    reinstall_jwt,
+                    existing_shared_secret,
+                    algorithms=["HS256"],
+                    options={"verify_aud": False},
+                )
+            except jwt.InvalidTokenError as e:
+                get_logger().error(f"Bitbucket re-installation rejected: invalid JWT signature ({e})")
+                return JSONResponse({"error": "Unauthorized re-installation"}, status_code=401)
+
     secrets = {
         "shared_secret": shared_secret,
-        "client_key": client_key
+        "client_key": client_key,
+        "username": username
     }
     try:
-        get_fork_safe_secret_provider().store_secret(username, json.dumps(secrets))
+        secret_provider.store_secret(client_key, json.dumps(secrets))
     except Exception as e:
         get_logger().error(f"Failed to register user: secret provider failure ({type(e).__name__})")
         return JSONResponse({"error": "Unable to register user"}, status_code=500)

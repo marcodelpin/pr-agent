@@ -47,6 +47,8 @@ class AWSSecretsManagerProvider(SecretProvider):
         except Exception as e:
             # Omit the secret name because GitLab passes its webhook token here.
             get_logger().warning(f"Failed to get secret from AWS Secrets Manager: {_error_kind(e)}")
+            if _error_kind(e) != "ResourceNotFoundException":
+                raise
             return ""
 
     def get_all_secrets(self) -> dict:
