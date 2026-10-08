@@ -7,9 +7,11 @@ from pr_agent.servers import bitbucket_app
 
 
 class _Request:
-    def __init__(self, headers, payload):
+    def __init__(self, headers, payload, method="POST", path="/webhook"):
         self.headers = headers
         self._payload = payload
+        self.method = method
+        self.url = type("URL", (), {"path": path, "query": ""})()
         self.json_calls = 0
 
     async def json(self):
@@ -35,11 +37,23 @@ def _route_endpoint(path, method):
 
 
 async def test_webhook_does_not_log_authorization_header(monkeypatch):
-    token = "webhook-authorization-sentinel"
+    sentinel = "webhook-authorization-sentinel"
+    token = f"e30.eyJpc3MiOiJjbGllbnQifQ.{sentinel}"
     authorization = f"jWt {token}"
     logger = _RecordingLogger()
     background_tasks = BackgroundTasks()
+    secret_provider = type(
+        "SecretProvider",
+        (),
+        {"get_secret": lambda self, _key: json.dumps({"shared_secret": "shared-secret"})},
+    )()
     monkeypatch.setattr(bitbucket_app, "get_logger", lambda: logger)
+    monkeypatch.setattr(bitbucket_app, "get_fork_safe_secret_provider", lambda: secret_provider)
+    monkeypatch.setattr(
+        bitbucket_app.jwt,
+        "decode",
+        lambda *args, **kwargs: {"qsh": bitbucket_app._compute_qsh("POST", "/webhook")},
+    )
 
     result = await _route_endpoint("/webhook", "POST")(
         background_tasks,
@@ -48,7 +62,8 @@ async def test_webhook_does_not_log_authorization_header(monkeypatch):
 
     assert result == "OK"
     assert len(background_tasks.tasks) == 1
-    assert token not in repr(logger.calls)
+    assert sentinel not in repr(logger.calls)
+    assert authorization not in repr(logger.calls)
 
 
 @pytest.mark.parametrize("headers", [{}, {"authorization": "JWT"}, {"authorization": "Bearer token"}])
@@ -212,11 +227,22 @@ async def test_webhook_logs_only_selected_payload_fields(monkeypatch):
             "description": "private-webhook-description",
         },
     }
+    secret_provider = type(
+        "SecretProvider",
+        (),
+        {"get_secret": lambda self, _key: json.dumps({"shared_secret": "shared-secret"})},
+    )()
     monkeypatch.setattr(bitbucket_app, "get_logger", lambda: logger)
+    monkeypatch.setattr(bitbucket_app, "get_fork_safe_secret_provider", lambda: secret_provider)
+    monkeypatch.setattr(
+        bitbucket_app.jwt,
+        "decode",
+        lambda *args, **kwargs: {"qsh": bitbucket_app._compute_qsh("POST", "/webhook")},
+    )
 
     result = await _route_endpoint("/webhook", "POST")(
         background_tasks,
-        _Request({"authorization": "JWT token"}, payload),
+        _Request({"authorization": "JWT e30.eyJpc3MiOiJjbGllbnQifQ.signature"}, payload),
     )
 
     logged = repr(logger.calls)

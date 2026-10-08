@@ -105,11 +105,24 @@ def process_patch_lines(patch_str, original_file_str, patch_extra_lines_before, 
                         extended_patch_lines.extend(delta_lines_original)
 
                     section_header, size1, size2, start1, start2 = extract_hunk_headers(match)
+                    # Shift a zero-length side (a pure insertion or deletion, as in `git diff -U0`) by one line:
+                    # its header numbers the line *before* the change.
+                    header_start1, header_start2 = start1, start2
+                    if size1 == 0:
+                        start1 += 1
+                    if size2 == 0:
+                        start2 += 1
 
                     is_valid_hunk = check_if_hunk_lines_matches_to_file(i, file_original_lines, patch_lines, start1)
 
                     if is_valid_hunk and (patch_extra_lines_before > 0 or patch_extra_lines_after > 0):
-                        def _calc_context_limits(patch_lines_before):
+                        def _calc_context_limits(
+                            patch_lines_before,
+                            start1=start1,
+                            size1=size1,
+                            start2=start2,
+                            size2=size2,
+                        ):
                             extended_start1 = max(1, start1 - patch_lines_before)
                             extended_size1 = size1 + (start1 - extended_start1) + patch_extra_lines_after
                             extended_start2 = max(1, start2 - patch_lines_before)
@@ -194,6 +207,11 @@ def process_patch_lines(patch_str, original_file_str, patch_extra_lines_before, 
                         extended_start2 = start2
                         extended_size2 = size2
                         delta_lines_original = []
+                    # Keep the original header numbering for a hunk that is still zero-length after extension
+                    if extended_size1 == 0:
+                        extended_start1 = header_start1
+                    if extended_size2 == 0:
+                        extended_start2 = header_start2
                     extended_patch_lines.append('')
                     extended_patch_lines.append(
                         f'@@ -{extended_start1},{extended_size1} '

@@ -309,6 +309,46 @@ def test_review_schema_reports_none_for_missing_fields():
     assert warning["artifact"]["value"] is None
 
 
+def test_review_schema_logs_all_pydantic_validation_errors():
+    reviewer = _make_prediction_reviewer()
+    with patch("pr_agent.tools.pr_reviewer.get_logger") as get_logger:
+        assert reviewer._validate_review_schema({"review": {"unexpected_extra_key": "val"}}) is False
+
+    warnings = [call.kwargs for call in get_logger.return_value.warning.call_args_list]
+    logged_fields = [w["artifact"]["field"] for w in warnings]
+    assert "review.key_issues_to_review" in logged_fields
+    assert "review.unexpected_extra_key" in logged_fields
+
+
+def test_review_schema_runs_require_checks_when_pydantic_validation_fails():
+    reviewer = _make_prediction_reviewer()
+    reviewer.vars = {"require_score": True}
+    with patch("pr_agent.tools.pr_reviewer.get_logger") as get_logger:
+        assert reviewer._validate_review_schema({
+            "review": {
+                "key_issues_to_review": [],
+                "unexpected_extra_key": "val",
+            }
+        }) is False
+
+    warnings = [call.kwargs for call in get_logger.return_value.warning.call_args_list]
+    logged_fields = [w["artifact"]["field"] for w in warnings]
+    assert "review.unexpected_extra_key" in logged_fields
+    assert "review.score" in logged_fields
+
+
+def test_review_schema_logs_all_missing_required_fields():
+    reviewer = _make_prediction_reviewer()
+    reviewer.vars = {"require_score": True, "require_tests": True}
+    with patch("pr_agent.tools.pr_reviewer.get_logger") as get_logger:
+        assert reviewer._validate_review_schema({"review": {"key_issues_to_review": []}}) is False
+
+    warnings = [call.kwargs for call in get_logger.return_value.warning.call_args_list]
+    logged_fields = [w["artifact"]["field"] for w in warnings]
+    assert "review.score" in logged_fields
+    assert "review.relevant_tests" in logged_fields
+
+
 def test_prepare_pr_review_limits_coverage_footer_to_50_files():
     reviewer = _make_prediction_reviewer()
     remaining_files = [f"file_{index}.py" for index in range(51)]

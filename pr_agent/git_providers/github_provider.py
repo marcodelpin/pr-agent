@@ -19,6 +19,8 @@ from retry.api import retry_call
 from starlette_context import context
 from starlette_context.errors import ContextDoesNotExistError
 
+from pr_agent.agent.request_policy import policy_metadata, policy_value
+
 from ..algo.comment_identity import (
     comment_matches_any_identity,
     get_pr_review_comment_identifiers,
@@ -70,6 +72,17 @@ def _next_page_url(headers: dict) -> str:
 
 
 class GithubProvider(GitProvider):
+    def get_request_policy_metadata(self, required_fields: set[str]) -> dict:
+        pr = self.pr
+        if pr is None:  # Issue commands have no PR-specific policy fields.
+            return policy_metadata(title="", sender="",
+                                   repo_full_name=policy_value(self.issue_main, "repository", "full_name"),
+                                   source_branch="", target_branch="")
+        return policy_metadata(title=pr.title, sender=policy_value(pr, "user", "login"),
+                               repo_full_name=self.repo, source_branch=policy_value(pr, "head", "ref"),
+                               target_branch=policy_value(pr, "base", "ref"),
+                               labels=self.get_pr_labels() if "labels" in required_fields else ())
+
     def __init__(self, pr_url: Optional[str] = None):
         self.repo_obj = None
         try:
@@ -1295,6 +1308,7 @@ class GithubProvider(GitProvider):
             )
         except (GithubException, RequestException) as e:
             get_logger().exception(f"Failed to reply comment, error: {e}")
+            raise
 
     def remove_initial_comment(self):
         try:
@@ -2180,7 +2194,7 @@ class GithubProvider(GitProvider):
                                 diff_code = (f"\n\n<details><summary>New proposed code:</summary>\n\n"
                                              f"```diff\n{patch.rstrip()}\n```")
                                 # replace ```suggestion ... ``` with diff_code, using regex:
-                                body = re.sub(r'```suggestion.*?```', lambda _: diff_code, body, flags=re.DOTALL)
+                                body = re.sub(r"```suggestion.*?```", lambda _, dc=diff_code: dc, body, flags=re.DOTALL)
                                 body += "\n\n</details>"
                                 suggestion['relevant_lines_start'] = new_start
                                 suggestion['relevant_lines_end'] = new_end

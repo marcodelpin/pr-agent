@@ -1216,20 +1216,21 @@ class PRReviewer:
                         first_key='review', last_key='security_concerns')
 
     def _validate_review_schema(self, data: object) -> bool:
+        is_valid = True
         try:
             PRReview.model_validate(data)
         except ValidationError as error:
-            first_error = error.errors()[0]
-            field_path = ".".join(str(part) for part in first_error.get("loc", ())) or "$"
-            value = None if first_error.get("type") == "missing" else first_error.get("input")
-            get_logger().warning(
-                "Review output failed schema validation",
-                artifact={
-                    "field": field_path,
-                    "value": value,
-                },
-            )
-            return False
+            is_valid = False
+            for err in error.errors():
+                field_path = ".".join(str(part) for part in err.get("loc", ())) or "$"
+                value = None if err.get("type") == "missing" else err.get("input")
+                get_logger().warning(
+                    "Review output failed schema validation",
+                    artifact={
+                        "field": field_path,
+                        "value": value,
+                    },
+                )
 
         if isinstance(data, dict) and isinstance(data.get("review"), dict):
             review = data["review"]
@@ -1251,12 +1252,12 @@ class PRReviewer:
             for field_name, setting_name in required_fields:
                 if not vars_.get(setting_name) or field_name in review and review[field_name] is not None:
                     continue
+                is_valid = False
                 get_logger().warning(
                     "Review output failed schema validation",
                     artifact={"field": f"review.{field_name}", "value": None},
                 )
-                return False
-        return True
+        return is_valid
 
     @classmethod
     def _load_valid_review_yaml(cls, prediction: str, *, source: str = "model response") -> dict:

@@ -564,12 +564,13 @@ def process_can_be_split(emoji, value):
         # key_nice = "Can this PR be split?"
         key_nice = "Multiple PR themes"
         markdown_text = ""
-        if not value or isinstance(value, list) and len(value) == 1:
-            value = "No"
+        if isinstance(value, str) and value.strip().lower() in ("no", "none", "false"):
+            value = None
+        if not value or isinstance(value, dict) or isinstance(value, list) and len(value) <= 1:
             # markdown_text += f"<tr><td> {emoji}&nbsp;<strong>{key_nice}</strong></td><td>\n\n{value}\n\n</td></tr>\n"
             # markdown_text += f"### {emoji} No multiple PR themes\n\n"
             markdown_text += f"{emoji} <strong>No multiple PR themes</strong>\n\n"
-        else:
+        elif isinstance(value, list):
             markdown_text += f"{emoji} <strong>{key_nice}</strong><br><br>\n\n"
             for split in value:
                 title = split.get('title', '')
@@ -1472,7 +1473,7 @@ def find_line_number_of_relevant_line_in_file(diff_files: List[FilePatchInfo],
                         relevant_line_in_file = matches_difflib[0]
 
 
-                def scan_patch_lines(is_match):
+                def scan_patch_lines(is_match, patch_lines=patch_lines, absolute_position=absolute_position):
                     scan_delta = 0
                     scan_start2 = 0
                     skip_hunk = False
@@ -1500,10 +1501,10 @@ def find_line_number_of_relevant_line_in_file(diff_files: List[FilePatchInfo],
                     return -1, absolute_position
 
                 position, absolute_position = scan_patch_lines(
-                    lambda line: line == relevant_line_in_file or line[1:] == relevant_line_in_file)
+                    lambda line, rl=relevant_line_in_file: line == rl or line[1:] == rl)
                 if position == -1:
                     position, absolute_position = scan_patch_lines(
-                        lambda line: relevant_line_in_file in line)
+                        lambda line, rl=relevant_line_in_file: rl in line)
 
                 if position == -1 and relevant_line_in_file[0] == '+':
                     no_plus_line = relevant_line_in_file[1:].lstrip()
