@@ -1,9 +1,8 @@
 import os
+import secrets
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Optional
-
-import dynaconf
+from typing import Optional, TypedDict
 
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
@@ -13,27 +12,29 @@ DEFAULT_ARTIFACT_INSTRUCTIONS = (
     "It was produced by a prior CI step."
 )
 
-_artifact_context: ContextVar[Optional[tuple[str, frozenset[str]]]] = ContextVar(
+SUPPORTED_ARTIFACT_TOOLS = frozenset({"pr_reviewer", "pr_description", "pr_code_suggestions"})
+
+
+class ArtifactPromptContext(TypedDict):
+    label: str
+    content: str
+    instructions: str
+    start_marker: str
+    end_marker: str
+
+
+_artifact_context: ContextVar[Optional[tuple[ArtifactPromptContext, frozenset[str]]]] = ContextVar(
     "pr_agent_artifact_context", default=None
 )
 
 
-def _append_artifact_context(settings, text, targets):
-    separator = "\n======\n\n"
-    for key in settings:
-        setting = settings.get(key)
-        if isinstance(setting, dynaconf.DataDict) and key.lower() in targets and hasattr(setting, "extra_instructions"):
-            extra_instructions = str(setting.extra_instructions or "")
-            if text not in extra_instructions:
-                setting.extra_instructions = extra_instructions + separator + text if extra_instructions else text
-
-
-def reapply_artifact_context() -> None:
-    """Compose already-read context after final command settings, without file I/O."""
+def get_artifact_context(tool_name: str) -> Optional[ArtifactPromptContext]:
+    """Return the separate CI artifact prompt context for a targeted tool."""
     payload = _artifact_context.get()
-    if payload is not None:
-        text, targets = payload
-        _append_artifact_context(get_settings(), text, targets)
+    if payload is None:
+        return None
+    context, targets = payload
+    return context if tool_name.lower() in targets else None
 
 
 def resolve_artifact_path(path: str) -> Optional[Path]:
@@ -68,6 +69,20 @@ def resolve_artifact_path(path: str) -> Optional[Path]:
 _TRUNCATION_MARKER = "\n\n[... content truncated due to size limit ...]"
 
 
+def _artifact_boundary_markers() -> tuple[str, str]:
+    """Build unpredictable prompt boundaries for one artifact payload."""
+    nonce = secrets.token_hex(16)
+    return (
+        f"<<<CI_ARTIFACT_{nonce}_BEGIN>>>",
+        f"<<<CI_ARTIFACT_{nonce}_END>>>",
+    )
+
+
+def _single_line_artifact_label(label: str) -> str:
+    """Collapse whitespace in an untrusted artifact label."""
+    return " ".join(str(label).split())
+
+
 def _read_and_truncate(path: Path, max_size: int) -> str:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -82,36 +97,24 @@ def _read_and_truncate(path: Path, max_size: int) -> str:
     return content
 
 
-def format_artifact_content(content: str, label: str, instructions: str) -> str:
-    header = f"CI Artifact: {label}" if label else "CI Artifact"
-    instructions = (instructions or "").strip() or DEFAULT_ARTIFACT_INSTRUCTIONS
-    return (
-        f"{header}\n"
-        f"=====\n"
-        f"{content}\n"
-        f"=====\n"
-        f"{instructions}"
-    )
-
-
-def load_artifact() -> str:
+def load_artifact_context() -> Optional[ArtifactPromptContext]:
     try:
         artifacts_settings = get_settings().get("ARTIFACTS", {})
     except AttributeError:
-        return ""
+        return None
 
     if not artifacts_settings:
-        return ""
+        return None
 
     enable = artifacts_settings.get("enable", False)
     if isinstance(enable, str):
         enable = enable.lower() == "true"
     if not enable:
-        return ""
+        return None
 
     artifact_path_str = artifacts_settings.get("artifact_path", "")
     if not artifact_path_str:
-        return ""
+        return None
 
     artifact_path = resolve_artifact_path(artifact_path_str)
     if not artifact_path:
@@ -119,7 +122,7 @@ def load_artifact() -> str:
             f"Artifact file not found or path rejected: '{artifact_path_str}' "
             f"(GITHUB_WORKSPACE={os.environ.get('GITHUB_WORKSPACE', 'not set')})"
         )
-        return ""
+        return None
 
     try:
         max_size = int(artifacts_settings.get("max_artifact_size", 50000))
@@ -129,21 +132,32 @@ def load_artifact() -> str:
         max_size = 50000
     content = _read_and_truncate(artifact_path, max_size)
     if not content:
-        return ""
+        return None
 
-    label = artifacts_settings.get("artifact_label", "") or artifact_path.name
-    instructions = artifacts_settings.get("artifact_instructions", "")
-    return format_artifact_content(content, label, instructions)
+    label = (
+        _single_line_artifact_label(artifacts_settings.get("artifact_label", "") or "")
+        or _single_line_artifact_label(artifact_path.name)
+        or "CI artifact"
+    )
+    start_marker, end_marker = _artifact_boundary_markers()
+    instructions = (artifacts_settings.get("artifact_instructions", "") or "").strip()
+    return {
+        "label": label,
+        "content": content,
+        "instructions": instructions or DEFAULT_ARTIFACT_INSTRUCTIONS,
+        "start_marker": start_marker,
+        "end_marker": end_marker,
+    }
 
 
 def inject_artifact_context() -> None:
-    """Append the CI artifact (see [artifacts]) to the extra_instructions of the target tools.
+    """Load a CI artifact for targeted tools as a separate prompt context.
 
     ARTIFACT_PATH in the environment turns the feature on by itself. Called once before a
     command runs, by the GitHub Action runner and by the CLI.
     """
-    # Each ingress prepares a new payload. Failed, empty, or disabled ingress must
-    # not leave an earlier task's payload available for dispatcher reapplication.
+    # Reset task-local context before each ingress so a failed, empty, or disabled
+    # load cannot reuse an earlier payload.
     _artifact_context.set(None)
 
     artifact_path_env = (
@@ -165,8 +179,8 @@ def inject_artifact_context() -> None:
         return
 
     try:
-        artifact_text = load_artifact()
-        if not artifact_text:
+        artifact_context = load_artifact_context()
+        if not artifact_context:
             return
         target_tools = get_settings().get(
             "ARTIFACTS.TARGET_TOOLS",
@@ -174,9 +188,16 @@ def inject_artifact_context() -> None:
         )
         if isinstance(target_tools, str):
             target_tools = [t.strip() for t in target_tools.split(",") if t.strip()]
-        target_tools = frozenset(str(t).lower() for t in target_tools)
-        _artifact_context.set((artifact_text, target_tools))
-        _append_artifact_context(get_settings(), artifact_text, target_tools)
+        requested_tools = frozenset(str(t).lower() for t in target_tools)
+        target_tools = requested_tools & SUPPORTED_ARTIFACT_TOOLS
+        unsupported_tools = sorted(requested_tools - SUPPORTED_ARTIFACT_TOOLS)
+        if unsupported_tools:
+            get_logger().warning(
+                f"Unsupported artifact target tools will be ignored: {unsupported_tools}"
+            )
+        if not target_tools:
+            return
+        _artifact_context.set((artifact_context, target_tools))
         get_logger().info(f"Injected artifact context into tools: {target_tools}")
     except (OSError, ValueError, TypeError) as e:
         get_logger().warning(f"Failed to process artifacts: {e}", exc_info=True)

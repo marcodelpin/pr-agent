@@ -181,6 +181,7 @@ require_merge_recommendation=false # ask the model for a merge recommendation (s
 require_priority_files=false # ask the model which files a human should inspect first
 # general options
 publish_output_no_suggestions=true # Set to "false" if you only need the reviewer's remarks (not labels, not "security audit", etc.) and want to avoid noisy "No major issues detected" comments.
+publish_review_failure_comment=true # Set to false to suppress review failure comments without changing the command's failure status.
 publish_error_details=false # Publish a deterministic, sanitized failure reason in manual review comments. No AI call is used.
 persistent_comment=true
 # Visible base heading for full and incremental review comments. Identity is tracked separately.
@@ -460,7 +461,8 @@ jira_requirements_field = ""
 # text with another prefix ("SHA-256", "UTF-8", "ISO-8601") is dropped before any lookup,
 # so it no longer costs an authenticated 404 each. Entries must be plain upper-case keys;
 # a supplied list with no valid entry disables the lookup rather than widening it.
-# Empty (default) looks up every key found.
+# Empty (default) looks up every key found. Host-only, like jira_site and jira_api_email:
+# repository settings and comment arguments cannot change them.
 project_keys = []
 
 [litellm]
@@ -591,11 +593,11 @@ max_skills_tokens = 8000 # token budget for the combined skills_context block
 enable = false
 # File path to the artifact (relative to GITHUB_WORKSPACE, or absolute)
 artifact_path = ""
-# Custom instructions appended after the artifact content (leave empty for a sensible default)
+# Analysis guidance rendered separately before the untrusted artifact label and content (leave empty for a sensible default)
 artifact_instructions = ""
 # Label shown to the AI — defaults to the filename when empty.
 artifact_label = ""
-# Which tools receive artifact context.
+# Which supported tools receive artifact context; unsupported names are skipped with a warning.
 target_tools = ["pr_reviewer", "pr_description", "pr_code_suggestions"]
 # Max artifact size in characters (content is truncated if exceeded)
 max_artifact_size = 50000

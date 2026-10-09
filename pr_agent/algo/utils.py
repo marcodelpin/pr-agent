@@ -393,12 +393,26 @@ def convert_to_markdown_v2(output_data: dict,
                 if gfm_supported:
                     markdown_text += "</td></tr>\n"
         else:
+            key_nice = html.escape(key_nice)
+            if isinstance(value, (dict, list)):
+                value_str = yaml.safe_dump(value, default_flow_style=False, allow_unicode=True).strip()
+            elif isinstance(value, (tuple, set)):
+                value_str = yaml.safe_dump(list(value), default_flow_style=False, allow_unicode=True).strip()
+            else:
+                value_str = str(value).strip()
+            value_str = html.escape(value_str)
             if gfm_supported:
+                value_display = "<br>".join(value_str.splitlines())
                 markdown_text += "<tr><td>"
-                markdown_text += f"{emoji}&nbsp;<strong>{key_nice}</strong>: {value}"
+                markdown_text += f"{emoji}&nbsp;<strong>{key_nice}</strong>: {value_display}"
                 markdown_text += "</td></tr>\n"
             else:
-                markdown_text += f"### {emoji} {key_nice}: {value}\n\n"
+                key_nice = key_nice.replace("[", r"\[").replace("]", r"\]")
+                value_str = value_str.replace("[", r"\[").replace("]", r"\]")
+                if "\n" in value_str:
+                    markdown_text += f"### {emoji} {key_nice}\n\n{value_str}\n\n"
+                else:
+                    markdown_text += f"### {emoji} {key_nice}: {value_str}\n\n"
 
     if gfm_supported:
         markdown_text += "</table>\n"
@@ -500,8 +514,10 @@ def ticket_markdown_logic(emoji, markdown_text, value, gfm_supported) -> str:
                     explanation += f"Non-compliant requirements:\n\n{not_compliant_str}\n\n"
                 if requires_further_human_verification:
                     explanation += f"Requires further human verification:\n\n{requires_further_human_verification}\n\n"
+                ticket_title = ticket_url.split('/')[-1] if ticket_url else "Untracked ticket"
+                ticket_reference = f"[{ticket_title}]({ticket_url})" if ticket_url else ticket_title
                 ticket_compliance_str += (
-                    f"\n\n**[{ticket_url.split('/')[-1]}]({ticket_url}) - "
+                    f"\n\n**{ticket_reference} - "
                     f"{ticket_compliance_level}**\n\n{explanation}\n\n"
                 )
 
@@ -1088,7 +1104,7 @@ def try_fix_yaml(response_text: str,
         if data is not None:
             get_logger().info("Successfully parsed AI prediction after adding |-\n")
             return data
-    except:
+    except Exception:
         pass
 
     # 1.5 fallback - try to convert '|' to '|2'. Will solve cases of indent decreasing during the code
@@ -1099,7 +1115,7 @@ def try_fix_yaml(response_text: str,
         if data is not None:
             get_logger().info("Successfully parsed AI prediction after replacing | with |2")
             return data
-    except:
+    except Exception:
         pass
     # try to add spaces to lines that are not indented properly, and contain '}'.
     # Moved out of the except block so it also runs when safe_load returned None (e.g. empty input).
@@ -1133,7 +1149,7 @@ def try_fix_yaml(response_text: str,
         if data is not None:
             get_logger().info("Successfully parsed AI prediction after replacing | with |2 and adding spaces")
             return data
-    except:
+    except Exception:
         pass
 
     # second fallback - try to extract only range from first ```yaml to the last ```
@@ -1160,7 +1176,7 @@ def try_fix_yaml(response_text: str,
         if data is not None:
             get_logger().info("Successfully parsed AI prediction after removing curly brackets")
             return data
-    except:
+    except Exception:
         pass
 
 
@@ -1187,7 +1203,7 @@ def try_fix_yaml(response_text: str,
                 if data is not None:
                     get_logger().info("Successfully parsed AI prediction after extracting yaml snippet")
                     return data
-            except:
+            except Exception:
                 pass
 
     # fifth fallback - try to remove leading '+' (sometimes added by AI for 'existing code' and 'improved code')
@@ -1200,7 +1216,7 @@ def try_fix_yaml(response_text: str,
         if data is not None:
             get_logger().info("Successfully parsed AI prediction after removing leading '+'")
             return data
-    except:
+    except Exception:
         pass
 
     # 5.5 fallback - try to normalize diff-style removal markers ('-') within list items
@@ -1251,7 +1267,7 @@ def try_fix_yaml(response_text: str,
             if data is not None:
                 get_logger().info("Successfully parsed AI prediction after replacing tabs with spaces")
                 return data
-        except:
+        except Exception:
             pass
 
     # seventh fallback - add indent for sections of code blocks
@@ -1278,7 +1294,7 @@ def try_fix_yaml(response_text: str,
         if data is not None:
             get_logger().info("Successfully parsed AI prediction after adding indent for sections of code blocks")
             return data
-    except:
+    except Exception:
         pass
 
     # eighth fallback - try to remove pipe chars at the root-level dicts
@@ -1289,7 +1305,7 @@ def try_fix_yaml(response_text: str,
         if data is not None:
             get_logger().info("Successfully parsed AI prediction after removing pipe chars")
             return data
-    except:
+    except Exception:
         pass
 
     # ninth fallback - try to decode the response text with different encodings.
@@ -1301,7 +1317,7 @@ def try_fix_yaml(response_text: str,
             if data:
                 get_logger().info(f"Successfully parsed AI prediction after decoding with {encoding} encoding")
                 return data
-        except:
+        except Exception:
             pass
 
     # # sixth fallback - try to remove last lines
