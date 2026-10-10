@@ -435,17 +435,20 @@ class GerritProvider(GitProvider):
         return True
 
     def split_suggestion(self, msg) -> tuple[str, str]:
-        is_code_context = False
+        # The fence that opened the suggestion block; it can be longer than three
+        # backticks when the suggested code itself contains a ``` line.
+        fence = None
         description = []
         context = []
         for line in msg.splitlines():
-            if line.startswith('```suggestion'):
-                is_code_context = True
+            opener = re.match(r'(`{3,})suggestion', line)
+            if opener and not fence:
+                fence = opener.group(1)
                 continue
-            if line.startswith('```'):
-                is_code_context = False
+            if line.startswith(fence or '```'):
+                fence = None
                 continue
-            if is_code_context:
+            if fence:
                 context.append(line)
             else:
                 description.append(
@@ -467,10 +470,15 @@ class GerritProvider(GitProvider):
             if not isinstance(suggestion, dict) or not isinstance(suggestion.get("relevant_file"), str):
                 get_logger().warning("Skipping malformed suggestion: missing or invalid 'relevant_file'")
                 continue
-            # Sanitize file path to prevent directory traversal
+            # Sanitize file path to prevent directory traversal.
+            # resolve() follows symlinks, so a tracked symlink into .git/
+            # would pass relative_to() and then be written by add_suggestion.
             try:
-                target_path = (repo_root / suggestion["relevant_file"]).resolve()
-                target_path.relative_to(repo_root)
+                unresolved = repo_root / suggestion["relevant_file"]
+                target_path = unresolved.resolve()
+                inside = [part.casefold() for part in target_path.relative_to(repo_root).parts]
+                if unresolved.is_symlink() or ".git" in inside:
+                    raise ValueError("refuses to write through a symlink or into git metadata")
             except ValueError:
                 get_logger().warning(f"Skipping suggestion with path traversal: {suggestion['relevant_file']}")
                 continue

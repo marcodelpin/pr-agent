@@ -157,7 +157,8 @@ to-do list.
 | `require_todo_scan` | false |  |
 | `require_ticket_analysis_review` | true |  |
 | `require_risk_assessment` | false | ask the model for an overall risk level (low/medium/high) |
-| `require_merge_recommendation` | false | ask the model for a merge recommendation (safe_to_merge/merge_with_caution/changes_required) |
+| `require_merge_recommendation` | false | ask the model for a merge recommendation: no_concerns_found (no important blockers or risks identified), needs_review (seems acceptable but deserves focused reviewer attention) or changes_required (clear issues to fix before merge) |
+| `require_failure_modes` | false | ask for up to three concrete failure scenarios and their detection/coverage |
 | `require_priority_files` | false | ask the model which files a human should inspect first |
 **general options**
 
@@ -174,6 +175,14 @@ to-do list.
 | `extra_instructions` | "" |  |
 | `num_max_findings` | 3 |  |
 | `final_update_message` | true |  |
+
+Azure DevOps also supplies verified PR-Agent inline key issues as dismissed when their status is `wontFix`
+or `byDesign` and differs from `azure_devops.default_comment_status`. Matching defaults, `fixed`, `closed`,
+active, and pending threads do not count as dismissals. This requires a stable
+`azure_devops_server.agent_identity` and infers a human decision from the current configuration; it cannot
+verify the status-changing actor or historical defaults. Dismissed findings share the existing
+`max_previous_findings_chars` budget and may be reported again if the code makes them worse.
+
 **review labels**
 
 | Key | Default | Description |
@@ -537,6 +546,7 @@ _This section only documents commented-out examples; see the [TOML source](https
 | `artifact_label` | "" | Label shown to the AI — defaults to the filename when empty. |
 | `target_tools` | ["pr_reviewer", "pr_description", "pr_code_suggestions"] | Which supported tools receive artifact context; unsupported names are skipped with a warning. |
 | `max_artifact_size` | 50000 | Max artifact size in characters (content is truncated if exceeded) |
+| `truncate_from` | "start" | Which end of the file to keep when truncating: "start" (default, keeps the beginning) or "end" (keeps the tail, where build logs carry their verdict - failure, plan summary or test result). |
 
 
 ## `[mosaico]` {#mosaico}

@@ -803,3 +803,62 @@ def test_get_files_includes_deleted_files(tmp_path):
 
     assert provider.get_files() == ["gone.py"]
     assert provider.get_diff_files()[0].edit_type == EDIT_TYPE.DELETED
+
+
+def _provider_for_suggestions(tmp_path):
+    repo = git.Repo.init(tmp_path)
+    (tmp_path / "app.py").write_text("print(1)\n")
+    repo.index.add(["app.py"])
+    repo.index.commit("initial")
+    provider = object.__new__(GerritProvider)
+    provider.repo_path = str(tmp_path)
+    return provider
+
+
+def _suggestion(relevant_file):
+    return {
+        "relevant_file": relevant_file,
+        "relevant_lines_start": 1,
+        "relevant_lines_end": 1,
+        "body": "```suggestion\nprint(2)\n```",
+    }
+
+
+def test_publish_code_suggestions_applies_a_file_inside_the_checkout(tmp_path, monkeypatch):
+    provider = _provider_for_suggestions(tmp_path)
+    applied = []
+    monkeypatch.setattr(gerrit_provider, "add_suggestion", lambda *args, **kwargs: applied.append(args))
+    monkeypatch.setattr(gerrit_provider, "diff", lambda **kwargs: "patch")
+    monkeypatch.setattr(gerrit_provider, "upload_patch", lambda patch, path: "https://patches.example/" + path)
+    monkeypatch.setattr(gerrit_provider, "reset_local_changes", lambda cwd: None)
+    monkeypatch.setattr(gerrit_provider, "add_comment", lambda *args, **kwargs: None)
+    provider.parsed_url = None
+    provider.refspec = "refs/changes/01/1/1"
+
+    assert provider.publish_code_suggestions([_suggestion("app.py")]) is True
+    assert applied and applied[0][0].name == "app.py"
+
+
+def test_publish_code_suggestions_skips_a_symlink(tmp_path, monkeypatch):
+    provider = _provider_for_suggestions(tmp_path)
+    link = tmp_path / "linked.py"
+    try:
+        link.symlink_to(tmp_path / ".git" / "config")
+    except OSError:
+        pytest.skip("creating a symlink is not permitted here")
+    applied = []
+    monkeypatch.setattr(gerrit_provider, "add_suggestion", lambda *args, **kwargs: applied.append(args))
+
+    assert provider.publish_code_suggestions([_suggestion("linked.py")]) is True
+    assert applied == []
+    assert (tmp_path / ".git" / "config").exists()
+
+
+@pytest.mark.parametrize("relevant_file", [".git/config", ".GIT/config"])
+def test_publish_code_suggestions_skips_git_metadata(tmp_path, monkeypatch, relevant_file):
+    provider = _provider_for_suggestions(tmp_path)
+    applied = []
+    monkeypatch.setattr(gerrit_provider, "add_suggestion", lambda *args, **kwargs: applied.append(args))
+
+    assert provider.publish_code_suggestions([_suggestion(relevant_file)]) is True
+    assert applied == []

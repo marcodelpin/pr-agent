@@ -41,6 +41,7 @@ from ..algo.utils import (
     Range,
     find_line_number_of_relevant_line_in_file,
     load_large_diff,
+    replace_suggestion_blocks,
     set_file_languages,
 )
 from ..config_loader import get_settings
@@ -69,6 +70,29 @@ def _next_page_url(headers: dict) -> str:
         if match:
             return match.group(1)
     return ""
+
+
+def _is_github_rate_limit_error(error: GithubException) -> bool:
+    """Recognize rate-limited 403 responses without retrying ordinary permission failures."""
+    if isinstance(error, RateLimitExceededException) or error.status == 429:
+        return True
+    if error.status != 403:
+        return False
+    message = error.data.get("message", "") if isinstance(error.data, dict) else ""
+    headers = error.headers or {}
+    remaining = headers.get("X-RateLimit-Remaining", headers.get("x-ratelimit-remaining", ""))
+    retry_after = headers.get("Retry-After", headers.get("retry-after"))
+    return (
+        "rate limit" in str(message).lower()
+        or "abuse detection" in str(message).lower()
+        or str(remaining) == "0"
+        or retry_after not in (None, "")
+    )
+
+
+def _is_permanent_github_error(error: GithubException) -> bool:
+    # Keep potentially transient client errors eligible for the existing retry policy.
+    return error.status in (400, 401, 403, 404, 410, 422) and not _is_github_rate_limit_error(error)
 
 
 class GithubProvider(GitProvider):
@@ -362,9 +386,10 @@ class GithubProvider(GitProvider):
             except RateLimitExceededException:
                 raise
             except GithubException as e:
-                if e.status == 429 or attempt == 1:
+                if (_is_github_rate_limit_error(e) or _is_permanent_github_error(e)
+                        or attempt == 1):
                     raise
-            except Exception:
+            except RequestException:
                 if attempt == 1:
                     raise
 
@@ -445,22 +470,10 @@ class GithubProvider(GitProvider):
             invalid_files_names = []
             is_close_to_rate_limit = False
 
-            # The base.sha will point to the current state of the base branch (including
-            # parallel merges), not the original base commit when the PR was created
-            # We can fix this by finding the merge base commit between the PR head and base branches
-            # Note that The pr.head.sha is actually correct as is - it points to the latest commit in your PR branch.
-            # This SHA isn't affected by parallel merges to the base branch since it's specific to your PR's branch.
+            # Resolve the merge base only when pre-change content is needed.
+            merge_base_commit = None
             repo = self.repo_obj
             pr = self.pr
-            try:
-                compare = repo.compare(pr.base.sha, pr.head.sha) # communication with GitHub
-                merge_base_commit = compare.merge_base_commit
-            except (GithubException, RequestException) as e:
-                get_logger().error(f"Failed to get merge base commit: {e}")
-                merge_base_commit = pr.base
-            if merge_base_commit.sha != pr.base.sha:
-                get_logger().info(
-                    f"Using merge base commit {merge_base_commit.sha} instead of base commit ")
 
             counter_valid = 0
             for file in files:
@@ -499,9 +512,19 @@ class GithubProvider(GitProvider):
                         if avoid_load or file.status == "added":
                             original_file_content_str = ""
                         else:
+                            if merge_base_commit is None:
+                                # Use the merge base instead of a potentially advanced target branch.
+                                try:
+                                    compare = repo.compare(pr.base.sha, pr.head.sha)
+                                    merge_base_commit = compare.merge_base_commit
+                                except (GithubException, RequestException) as e:
+                                    get_logger().error(f"Failed to get merge base commit: {e}")
+                                    merge_base_commit = pr.base
+                                if merge_base_commit.sha != pr.base.sha:
+                                    get_logger().info(
+                                        f"Using merge base commit {merge_base_commit.sha} instead of base commit ")
                             original_file_content_str = self._get_pr_file_content(
                                 file, merge_base_commit.sha, path=old_filename)
-                            # original_file_content_str = self._get_pr_file_content(file, self.pr.base.sha)
                         if not patch:
                             patch = load_large_diff(file.filename, new_file_content_str, original_file_content_str)
 
@@ -547,12 +570,20 @@ class GithubProvider(GitProvider):
 
             return diff_files
 
-        except IncompletePullRequestFilesError:
+        except (IncompletePullRequestFilesError, RateLimitExceeded):
             raise
-        except Exception as e:
+        except (GithubException, RequestException) as e:
             get_logger().error(f"Failing to get diff files: {e}",
                                artifact={"traceback": traceback.format_exc()})
-            raise RateLimitExceeded("Rate limit exceeded for GitHub API.") from e
+            if isinstance(e, GithubException) and _is_permanent_github_error(e):
+                # Skip outer retries for permanent client errors.
+                raise
+            raise RateLimitExceeded("Retryable GitHub API failure while collecting diff files.") from e
+        except Exception as e:
+            # Preserve traceback logging while avoiding retries for programming errors.
+            get_logger().error(f"Failing to get diff files: {e}",
+                               artifact={"traceback": traceback.format_exc()})
+            raise
 
     def publish_description(self, pr_title: str, pr_body: str):
         if pr_title is None:
@@ -1244,10 +1275,13 @@ class GithubProvider(GitProvider):
         for comment in invalid_comments:
             try:
                 fixed_comment = copy.deepcopy(comment)  # avoid modifying the original comment dict for later logging
-                if "```suggestion" in comment["body"]:
-                    # Keep what follows the block, where the dedup markers live.
-                    before, _, rest = comment["body"].partition("```suggestion")
-                    fixed_comment["body"] = before + rest.rsplit("```", 1)[-1]
+                opener = re.search(r"(?<!`)(`{3,})suggestion", comment["body"])
+                if opener:
+                    # Keep what follows the block, where the dedup markers live. The
+                    # block may be fenced with more than three backticks.
+                    fence = opener.group(1)
+                    before, rest = comment["body"][:opener.start()], comment["body"][opener.end():]
+                    fixed_comment["body"] = before + rest.rsplit(fence, 1)[-1]
                 if "start_line" in comment:
                     fixed_comment["line"] = comment["start_line"]
                     del fixed_comment["start_line"]
@@ -1847,10 +1881,8 @@ class GithubProvider(GitProvider):
                 raise
             file_content_str = ""
         except (RequestException, UnicodeDecodeError, binascii.Error, AssertionError, AttributeError):
-            # binascii.Error: PyGithub base64-decodes the payload in `decoded_content`, so a
-            # corrupt body fails here rather than at the request. Letting it escape would reach
-            # the diff-build handler and be re-raised as RateLimitExceeded, retrying the review.
-            # AssertionError: the same property asserts on an entry with no content, such as a submodule pointer.
+            # Decoding corrupt base64 content can raise binascii.Error; submodule entries
+            # without file content may raise AssertionError.
             if propagate_errors:
                 raise
             file_content_str = ""
@@ -2203,8 +2235,8 @@ class GithubProvider(GitProvider):
                                 patch = "\n".join(patch_orig.splitlines()[5:]).strip('\n')
                                 diff_code = (f"\n\n<details><summary>New proposed code:</summary>\n\n"
                                              f"```diff\n{patch.rstrip()}\n```")
-                                # replace ```suggestion ... ``` with diff_code, using regex:
-                                body = re.sub(r"```suggestion.*?```", lambda _, dc=diff_code: dc, body, flags=re.DOTALL)
+                                # replace ```suggestion ... ``` with diff_code:
+                                body = replace_suggestion_blocks(body, diff_code)
                                 body += "\n\n</details>"
                                 suggestion['relevant_lines_start'] = new_start
                                 suggestion['relevant_lines_end'] = new_end

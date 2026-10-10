@@ -27,12 +27,9 @@ Flow:
   - If the value is a dictionary, recursively call the 'convert_to_markdown' function with the value as input and
   append the returned markdown text to 'markdown_text'.
   - If the value is a list:
-    - If the key is 'code suggestions', add an additional line break to 'markdown_text'.
     - Get the corresponding emoji for the key from the 'emojis' dictionary. If no emoji is found, use a dash.
     - Append the emoji and key to 'markdown_text'.
     - Iterate through the items in the list:
-      - If the item is a dictionary and the key is 'code suggestions', call the 'parse_code_suggestion' function with
-      the item as input and append the returned markdown text to 'markdown_text'.
       - If the item is not empty, append it to 'markdown_text'.
   - If the value is not 'n/a', get the corresponding emoji for the key from the 'emojis' dictionary. If no emoji is
   found, use a dash. Append the emoji, key, and value to 'markdown_text'.
@@ -43,7 +40,6 @@ Outputs:
 
 Additional aspects:
 - The function uses recursion to handle nested dictionaries.
-- The 'parse_code_suggestion' function is called for items in the 'code suggestions' list.
 - The function uses emojis to add visual cues to the markdown text.
 """
 
@@ -351,7 +347,7 @@ class TestConvertToMarkdown:
         input_data = {
             "review": {
                 "risk_level": "medium",
-                "merge_recommendation": "merge_with_caution",
+                "merge_recommendation": "needs_review",
                 "review_priority_files": ["gui_app.py", "app.py"],
             }
         }
@@ -359,7 +355,7 @@ class TestConvertToMarkdown:
         markdown = convert_to_markdown_v2(input_data, gfm_supported=False)
 
         assert "Risk level: Medium" in markdown
-        assert "Merge recommendation: Merge with caution" in markdown
+        assert "Merge recommendation: Needs review" in markdown
         assert "Priority files" in markdown
         assert "- gui_app.py" in markdown
         assert "- app.py" in markdown
@@ -368,7 +364,7 @@ class TestConvertToMarkdown:
         input_data = {
             "review": {
                 "risk_level": "low",
-                "merge_recommendation": "safe_to_merge",
+                "merge_recommendation": "no_concerns_found",
                 "review_priority_files": [],
             }
         }
@@ -376,7 +372,7 @@ class TestConvertToMarkdown:
         markdown = convert_to_markdown_v2(input_data, gfm_supported=False)
 
         assert "Risk level: Low" in markdown
-        assert "Merge recommendation: Safe to merge" in markdown
+        assert "Merge recommendation: No concerns found" in markdown
         assert "Priority files: None" in markdown
 
     def test_structured_review_fields_ignore_invalid_priority_files_type(self):
@@ -407,6 +403,41 @@ class TestConvertToMarkdown:
         assert "<ul>\n<li>gui_app.py</li>\n</ul>" in markdown
         assert "- gui_app.py" not in markdown
         assert markdown.count("<tr><td>") == markdown.count("</td></tr>") == 3
+
+    @pytest.mark.parametrize("gfm_supported", [True, False])
+    def test_failure_modes_render_safe_structured_cases(self, gfm_supported):
+        mode = {"what": "Partial write </td></tr><img src=x>", "where": "src/foo_bar.py:get(value)",
+                "trigger": "![track](https://example.com/image)\nWrite fails",
+                "detected_by": "Write failure test", "covered_in_this_pr": False}
+        malformed = {**mode, "covered_in_this_pr": "false"}
+        markdown = convert_to_markdown_v2(
+            {"review": {"failure_modes": [malformed, None, mode, {**mode, "covered_in_this_pr": True}]}},
+            gfm_supported=gfm_supported,
+        )
+        assert "Failure modes" in markdown
+        assert markdown.count("Partial write") == 2
+        assert "Write failure test" in markdown
+        assert "&lt;img src=x&gt;" in markdown
+        assert "<img" not in markdown
+        assert "Covered in this PR" in markdown and "Yes" in markdown and "No" in markdown
+        if gfm_supported:
+            assert markdown.count("<tr><td>") == markdown.count("</td></tr>") == 1
+            assert "src/foo_bar.py:get(value)" in markdown
+        else:
+            assert "![track](" not in markdown
+
+    @pytest.mark.parametrize("gfm_supported", [True, False])
+    def test_failure_modes_render_empty_state_and_cap_single_response(self, gfm_supported):
+        assert "No failure modes identified." in convert_to_markdown_v2(
+            {"review": {"failure_modes": []}}, gfm_supported=gfm_supported,
+        )
+        assert "No failure modes identified." in convert_to_markdown_v2(
+            {"review": {"failure_modes": {"what": "bad"}}}, gfm_supported=gfm_supported,
+        )
+        mode = {"what": "Partial write", "where": "app.py:save", "trigger": "Write fails",
+                "detected_by": "Write failure test", "covered_in_this_pr": False}
+        markdown = convert_to_markdown_v2({"review": {"failure_modes": [mode] * 4}}, gfm_supported=gfm_supported)
+        assert markdown.count("Partial write") == 3
 
     # Tests that the function works correctly with an empty dictionary input
     def test_empty_dictionary_input(self):
