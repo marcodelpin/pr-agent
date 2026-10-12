@@ -504,12 +504,13 @@ class LiteLLMAIHandler(BaseAiHandler):
         if global_settings.get("LITELLM.DISABLE_AIOHTTP", False):
             litellm.disable_aiohttp_transport = True
         self._initialize_aws_request_credentials(settings)
-        if settings.get("LITELLM.SUCCESS_CALLBACK", None):
-            litellm.success_callback = settings.litellm.success_callback
-        if settings.get("LITELLM.FAILURE_CALLBACK", None):
-            litellm.failure_callback = settings.litellm.failure_callback
-        if settings.get("LITELLM.SERVICE_CALLBACK", None):
-            litellm.service_callback = settings.litellm.service_callback
+        # LiteLLM callbacks are process globals, so only deployment settings may set them.
+        if global_settings.get("LITELLM.SUCCESS_CALLBACK", None):
+            litellm.success_callback = global_settings.litellm.success_callback
+        if global_settings.get("LITELLM.FAILURE_CALLBACK", None):
+            litellm.failure_callback = global_settings.litellm.failure_callback
+        if global_settings.get("LITELLM.SERVICE_CALLBACK", None):
+            litellm.service_callback = global_settings.litellm.service_callback
         # litellm callbacks attach full prompt and response content unless message logging is disabled.
         if settings.get("LITELLM.TURN_OFF_MESSAGE_LOGGING", False):
             litellm.turn_off_message_logging = True
@@ -2644,14 +2645,17 @@ class LiteLLMAIHandler(BaseAiHandler):
         return cache_control_injection_points
 
     def _split_system_prompt_for_skills_cache(self, messages: list[dict], model: str, injection_points) -> None:
-        """Move the cache breakpoint to the end of the shared skills prefix (#4007).
+        """Add a cache breakpoint at the end of the shared skills prefix (#4007).
 
         The review tools open their system prompts with an identical skills block, so marking
         that block lets Anthropic read one cache entry across /review, /describe and /improve
-        instead of writing one per tool. Only applies to Anthropic Claude models when a
-        configured injection point targets the system message and the rendered prefix matches;
-        every other request keeps the plain system string. Splitting at the prefix is safe
-        because the two text blocks concatenate back to the original content.
+        instead of writing one per tool. The tool-specific remainder keeps its own breakpoint
+        rather than losing it, so a tool that repeats still reads its whole system prompt; the
+        price is a second breakpoint slot of the four Anthropic allows, not a smaller cache.
+        Only applies to Anthropic Claude models when a configured injection point targets the
+        system message and the rendered prefix matches; every other request keeps the plain
+        system string. Splitting at the prefix is safe because the two text blocks concatenate
+        back to the original content.
         """
         if not injection_points or not self._is_claude_model(model):
             return
