@@ -876,6 +876,40 @@ OPENAI__KEY=...
 
 Keep the `openai/` prefix on the model name, whichever Cheaper Inference model ID you use (`openai/gpt-5.4-mini`, `openai/claude-sonnet-5`, `openai/gemini-3.1-pro`, `openai/deepseek-v4-flash`, ...): the prefix routes the request through litellm's OpenAI-compatible path. A prefixed name is not in the `MAX_TOKENS` table [here](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/algo/__init__.py), so you also have to set `custom_model_max_tokens`. Take the value from Cheaper Inference's [model catalog](https://cheaperinference.com/#models).
 
+### API Route
+
+[API Route](https://www.api-route.com) exposes an OpenAI-compatible endpoint. Use
+PR-Agent's existing `openai/` model prefix and `[openai]` settings to configure it:
+
+```toml
+[config] # in configuration.toml
+model = "openai/gpt-6.1-sol"
+fallback_models = ["openai/gpt-6.1-sol"]
+custom_model_max_tokens = 32000 # example input budget; keep within the selected model's context limit
+
+[openai] # in .secrets.toml
+api_base = "https://global.api-route.com/v1"
+key = "..." # your API Route API key
+```
+
+The endpoint and key can also be supplied through environment variables (with double
+underscores `__`):
+
+```bash
+OPENAI__API_BASE=https://global.api-route.com/v1
+OPENAI__KEY=...
+```
+
+Obtain an API key from [API Route](https://www.api-route.com) and choose an available
+model from its [model catalog](https://www.api-route.com/pricing) or the authenticated
+`GET https://global.api-route.com/v1/models` endpoint. Keep the `openai/` prefix in
+PR-Agent's configuration; the endpoint receives the model ID without that prefix.
+
+Set `custom_model_max_tokens` for model IDs absent from PR-Agent's token-limit table.
+The example uses a 32,000-token input budget, rather than claiming the model's maximum
+context window. If you change the model or add fallback models, use a budget supported
+by all of them and keep their requests on the configured API Route endpoint.
+
 ### RelaxAI
 
 [RelaxAI](https://relax.ai) offers an OpenAI-compatible API. It needs no provider-specific
@@ -1173,13 +1207,6 @@ Without routing, regular-model calls use `config.model`, however small the pull 
 the first rule selects the cheaper Luna model; the second deliberately keeps the default Sol model.
 `config.fallback_models` still apply after the selected primary:
 
-:::warning[Routing example requires the collision repair]
-Enable this example only on a version that includes the routed-fallback collision repair tracked in
-[public PR #4064](https://github.com/The-PR-Agent/pr-agent/pull/4064).
-Without it, selecting Luna with the shipped fallback list retries Luna instead of reaching Sol.
-Routing is disabled by default; regular calls without a routing rule use Sol followed by Luna.
-:::
-
 ```toml
 [model_routing]
 enable = true
@@ -1198,6 +1225,25 @@ Rules are checked in order, and the first one whose limits the pull request fits
 the call. A pull request that fits no rule uses `config.model`. Size is measured by the number of diff hunks
 (`max_hunks`) and changed files (`max_files`) left after the `[ignore]` rules. Every git provider reports both,
 and neither depends on a model's tokenizer, so a threshold means the same thing whichever model it selects.
+
+The retry chain starts as `[config.model] + config.fallback_models`, with a deployment paired to each model.
+A matched rule replaces the first pair. If the routed `(model, deployment)` pair also appears among the
+configured fallbacks, the effective chain removes duplicate pairs while preserving their order and adds
+the displaced configured primary pair at the end, unless it is already present. This avoids retrying the
+same endpoint while retaining the configured primary in this collision case. With
+`config.model = "gpt-6.1-sol"`, no deployment configured, and the first rule above:
+
+| `config.fallback_models` | retry order if earlier attempts fail |
+| --- | --- |
+| `["gpt-6-luna"]` (shipped default) | `gpt-6-luna`, `gpt-6.1-sol` |
+| `["gpt-6-luna", "other-model"]` | `gpt-6-luna`, `other-model`, `gpt-6.1-sol` |
+
+The first successful attempt returns immediately; later entries are attempted only after fallback-eligible
+failures. An empty fallback list adds no backup, and a noncolliding route still replaces the primary without
+adding it back. The same model with distinct deployment IDs is treated as distinct endpoints. `/improve`
+uses this effective chain to recover failed chunks without rerunning successful chunks. Its defensive
+uniqueness checks remain: repeated complete pairs in unchanged, noncolliding or unrouted chains can still
+disable chunk recovery; those chains are not deduplicated by this routing-specific repair.
 
 Routing applies only to calls that ask for the regular model: `/review`, `/improve`, `/generate_labels` and
 `/add_docs`. Tools that already use `config.model_weak` (`/describe`, `/ask`, `/update_changelog`) are left

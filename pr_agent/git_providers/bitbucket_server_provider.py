@@ -2,7 +2,6 @@ import difflib
 import subprocess
 from collections import Counter
 from types import SimpleNamespace
-from typing import Optional, Tuple
 from urllib.parse import quote, quote_plus, urlparse
 
 from atlassian.bitbucket import Bitbucket
@@ -29,8 +28,8 @@ class BitbucketServerProvider(GitProvider):
                                target_branch=policy_value(self.pr, "toRef", "displayId"))
 
     def __init__(
-            self, pr_url: Optional[str] = None, incremental: Optional[bool] = False,
-            bitbucket_client: Optional[Bitbucket] = None,
+            self, pr_url: str | None = None, incremental: bool | None = False,
+            bitbucket_client: Bitbucket | None = None,
     ):
         self.bitbucket_server_url = None
         self.workspace_slug = None
@@ -92,7 +91,7 @@ class BitbucketServerProvider(GitProvider):
     # suffix: "?at=refs%2Fheads%2Fmy_branch"
     # In case git url is not provided, provider will use PR context (which includes branch) to
     # determine the prefix and suffix.
-    def get_canonical_url_parts(self, repo_git_url:str=None, desired_branch:str=None) -> Tuple[str, str]:
+    def get_canonical_url_parts(self, repo_git_url:str=None, desired_branch:str=None) -> tuple[str, str]:
         workspace_name = None
         project_name = None
         if not repo_git_url:
@@ -158,7 +157,7 @@ class BitbucketServerProvider(GitProvider):
         ref = self.get_repo_context_ref(from_default_branch)
         return self.get_file(file_path, ref)
 
-    def get_repo_context_ref(self, from_default_branch: bool = False) -> Optional[str]:
+    def get_repo_context_ref(self, from_default_branch: bool = False) -> str | None:
         if from_default_branch:
             default_branch_dict = self.bitbucket_client.get_default_branch(self.workspace_slug, self.repo_slug)
             return default_branch_dict.get('displayId') or self.pr.toRef['latestCommit']
@@ -226,7 +225,7 @@ class BitbucketServerProvider(GitProvider):
         self.workspace_slug, self.repo_slug, self.pr_num = self._parse_pr_url(pr_url)
         self.pr = self._get_pr()
 
-    def get_file(self, path: str, commit_id: str):
+    def get_file(self, path: str, commit_id: str, *, missing_is_error: bool = False):
         file_content = ""
         try:
             file_content = self.bitbucket_client.get_content_of_file(self.workspace_slug,
@@ -235,6 +234,8 @@ class BitbucketServerProvider(GitProvider):
                                                                      commit_id)
         except HTTPError as e:
             if getattr(getattr(e, "response", None), "status_code", None) == 404:
+                if missing_is_error:
+                    raise
                 get_logger().debug(f"File {path} not found at commit id: {commit_id}")
                 return file_content
             raise
@@ -324,34 +325,45 @@ class BitbucketServerProvider(GitProvider):
         for change in retained_changes:
             file_path = change['path']['toString']
             old_filename = None
-            match change['type']:
-                case 'ADD':
-                    edit_type = EDIT_TYPE.ADDED
-                    new_file_content_str = self.get_file(file_path, head_sha)
-                    new_file_content_str = decode_if_bytes(new_file_content_str)
-                    original_file_content_str = ""
-                case 'DELETE':
-                    edit_type = EDIT_TYPE.DELETED
-                    new_file_content_str = ""
-                    original_file_content_str = self.get_file(file_path, base_sha)
-                    original_file_content_str = decode_if_bytes(original_file_content_str)
-                case 'MOVE' | 'RENAME':
-                    edit_type = EDIT_TYPE.RENAMED
-                    source_path = change.get('srcPath') or {}
-                    original_file_path = source_path.get('toString', file_path)
-                    old_filename = original_file_path if original_file_path != file_path else None
-                    original_file_content_str = self.get_file(original_file_path, base_sha)
-                    original_file_content_str = decode_if_bytes(original_file_content_str)
-                    new_file_content_str = self.get_file(file_path, head_sha)
-                    new_file_content_str = decode_if_bytes(new_file_content_str)
-                case _:
-                    edit_type = EDIT_TYPE.MODIFIED
-                    original_file_content_str = self.get_file(file_path, base_sha)
-                    original_file_content_str = decode_if_bytes(original_file_content_str)
-                    new_file_content_str = self.get_file(file_path, head_sha)
-                    new_file_content_str = decode_if_bytes(new_file_content_str)
+            content_fetch_failed = False
+            try:
+                match change['type']:
+                    case 'ADD':
+                        edit_type = EDIT_TYPE.ADDED
+                        new_file_content_str = self.get_file(file_path, head_sha, missing_is_error=True)
+                        new_file_content_str = decode_if_bytes(new_file_content_str)
+                        original_file_content_str = ""
+                    case 'DELETE':
+                        edit_type = EDIT_TYPE.DELETED
+                        new_file_content_str = ""
+                        original_file_content_str = self.get_file(file_path, base_sha, missing_is_error=True)
+                        original_file_content_str = decode_if_bytes(original_file_content_str)
+                    case 'MOVE' | 'RENAME':
+                        edit_type = EDIT_TYPE.RENAMED
+                        source_path = change.get('srcPath') or {}
+                        original_file_path = source_path.get('toString', file_path)
+                        old_filename = original_file_path if original_file_path != file_path else None
+                        original_file_content_str = self.get_file(original_file_path, base_sha, missing_is_error=True)
+                        original_file_content_str = decode_if_bytes(original_file_content_str)
+                        new_file_content_str = self.get_file(file_path, head_sha, missing_is_error=True)
+                        new_file_content_str = decode_if_bytes(new_file_content_str)
+                    case _:
+                        edit_type = EDIT_TYPE.MODIFIED
+                        original_file_content_str = self.get_file(file_path, base_sha, missing_is_error=True)
+                        original_file_content_str = decode_if_bytes(original_file_content_str)
+                        new_file_content_str = self.get_file(file_path, head_sha, missing_is_error=True)
+                        new_file_content_str = decode_if_bytes(new_file_content_str)
+            except HTTPError as e:
+                if getattr(getattr(e, "response", None), "status_code", None) != 404:
+                    raise
+                # An unreadable side would render as a whole-file add or delete, so keep the file
+                # as an unreadable-file notice instead of inventing changes.
+                get_logger().warning(f"Not emitting a patch for {file_path}: its content could not be read ({e})")
+                original_file_content_str = new_file_content_str = ""
+                content_fetch_failed = True
 
-            patch = load_large_diff(file_path, new_file_content_str, original_file_content_str, show_warning=False)
+            patch = "" if content_fetch_failed else load_large_diff(
+                file_path, new_file_content_str, original_file_content_str, show_warning=False)
 
             patch_lines = patch.splitlines(keepends=True)
             diff_files.append(
@@ -364,6 +376,7 @@ class BitbucketServerProvider(GitProvider):
                     old_filename=old_filename,
                     num_plus_lines=len([line for line in patch_lines if line.startswith('+')]),
                     num_minus_lines=len([line for line in patch_lines if line.startswith('-')]),
+                    content_fetch_failed=content_fetch_failed,
                 )
             )
 
@@ -624,7 +637,7 @@ class BitbucketServerProvider(GitProvider):
             get_logger().warning(f"Failed to get head SHA, error: {e}")
             return ""
 
-    def add_eyes_reaction(self, issue_comment_id: int, disable_eyes: bool = False) -> Optional[int]:
+    def add_eyes_reaction(self, issue_comment_id: int, disable_eyes: bool = False) -> int | None:
         return None
 
     def remove_reaction(self, issue_comment_id: int, reaction_id: int) -> bool:
@@ -643,7 +656,7 @@ class BitbucketServerProvider(GitProvider):
         return f"{parsed_url.scheme}://{parsed_url.netloc}"
 
     @staticmethod
-    def _parse_pr_url(pr_url: str) -> Tuple[str, str, int]:
+    def _parse_pr_url(pr_url: str) -> tuple[str, str, int]:
         # pr url format: f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
         parsed_url = urlparse(pr_url)
 

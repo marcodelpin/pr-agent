@@ -23,6 +23,7 @@ log_level="DEBUG"
 # Configurations
 use_repo_settings_file=true
 use_global_settings_file=true
+use_group_settings_file=false # host-only opt-in to GitLab closest-subgroup settings; also requires use_global_settings_file and a nonempty global_settings_repo
 global_settings_repo="" # host-only name of the repository, in the owning org/group/workspace, whose .pr_agent.toml applies to every repository there. Empty disables namespace-wide settings; set "pr-agent-settings" to keep the previous behaviour
 enable_per_directory_settings=false # when true, merge per-directory .pr_agent.toml files found by walking up from the PR's changed files (monorepo support). Adds bounded recursive tree discovery per MR; per-directory files may only override non-critical sections (see REPO_PER_DIRECTORY_OVERRIDABLE_SECTIONS). Nearest (deepest) directory wins on shared keys; equal-depth siblings resolve to the lexicographically-last path; when more files match than the per_directory_settings_max_files cap, shallower files are applied first and a partially capped depth keeps its later-path (winning) siblings; any overlap is logged as a warning.
 per_directory_settings_max_files=20 # hard ceiling on the number of per-directory .pr_agent.toml files applied per MR (deeper configs beyond the cap are skipped with a warning)
@@ -465,9 +466,10 @@ jira_requirements_field = ""
 # text with another prefix ("SHA-256", "UTF-8", "ISO-8601") is dropped before any lookup,
 # so it no longer costs an authenticated 404 each. Entries must be plain upper-case keys;
 # a supplied list with no valid entry disables the lookup rather than widening it.
-# Empty (default) looks up every key found. Host-only, like jira_site and jira_api_email:
-# repository settings and comment arguments cannot change them.
-project_keys = []
+# Wildcard ["*"] (default) looks up every key found. An empty list ([]) disables Jira ticket
+# lookups. Host-only, like jira_site and jira_api_email: repository settings and comment
+# arguments cannot change them.
+project_keys = ["*"]
 
 [litellm]
 # use_client = false
@@ -542,9 +544,12 @@ max_tokens = 0 # hard cap on completion tokens for the request; 0 = unset
 # are routed (/review, /improve, /generate_labels, /add_docs); tools that use model_weak are left alone.
 # With Azure (openai.deployment_id set) a rule also needs its own deployment_id, or it is skipped.
 enable = false
-# Enable the Luna example only on a version with the routed-fallback collision repair (public PR #4064).
 # Example: [{ max_hunks = 3, model = "gpt-6-luna" },
 # { max_hunks = 15, max_files = 6, model = "gpt-6.1-sol" }]
+# A matched rule replaces the primary (model, deployment) pair. If it matches a configured fallback pair,
+# deduplicate the effective chain and append the displaced primary unless already present.
+# Otherwise the configured fallbacks follow unchanged. Later pairs are attempted only after fallback-eligible
+# failures; distinct deployments remain separate. /improve uses this effective chain for chunk recovery.
 rules = []
 
 [otel]
