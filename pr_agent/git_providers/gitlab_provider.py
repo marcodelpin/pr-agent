@@ -2071,7 +2071,7 @@ class GitLabProvider(GitProvider):
 
     def get_languages(self):
         if not hasattr(self, "_languages"):
-            self._languages = self.gl.projects.get(self.id_project).languages()
+            self._languages = self.gl.projects.get(self.id_project, lazy=True).languages()
         return self._languages
 
     def get_pr_branch(self):
@@ -2526,7 +2526,7 @@ class GitLabProvider(GitProvider):
         return project_path, mr_id
 
     def _get_merge_request(self):
-        mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
+        mr = self.gl.projects.get(self.id_project, lazy=True).mergerequests.get(self.id_mr)
         return mr
 
     def get_user_id(self):
@@ -2608,7 +2608,7 @@ class GitLabProvider(GitProvider):
         """
         max_tokens = get_settings().get("CONFIG.MAX_COMMITS_TOKENS", None)
         try:
-            commit_messages_list = [commit['message'] for commit in self.mr.commits()._list]
+            commit_messages_list = [commit['message'] for commit in self.mr.commits(per_page=100)._list]
             commit_messages_str = "\n".join([f"{i + 1}. {message}" for i, message in enumerate(commit_messages_list)])
         except (GitlabError, RequestException, KeyError, TypeError, AttributeError):
             commit_messages_str = ""

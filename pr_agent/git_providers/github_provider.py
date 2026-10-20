@@ -310,7 +310,9 @@ class GithubProvider(GitProvider):
                 if commit.commit.message.startswith(f"Merge branch '{self._get_repo().default_branch}'"):
                     get_logger().info(f"Skipping merge commit {commit.commit.message}")
                     continue
-                self.unreviewed_files_map.update({file.filename: file for file in commit.files})
+                self.unreviewed_files_map.update({
+                    file.filename: file for file in commit.get_files(commit_files_per_page=300)
+                })
         else:
             get_logger().info("No previous review found, will review the entire PR")
             self.incremental.is_incremental = False
@@ -1905,6 +1907,7 @@ class GithubProvider(GitProvider):
             return Github(
                 auth=self.auth,
                 base_url=self.base_url,
+                per_page=100,
                 seconds_between_requests=seconds_between_requests,
                 seconds_between_writes=seconds_between_writes,
                 retry=retry,
@@ -2007,7 +2010,17 @@ class GithubProvider(GitProvider):
         return head_name.casefold() == base_name.casefold()
 
     def _get_pr_file_content(self, file: FilePatchInfo, sha: str, path: str = None) -> str:
-        return self.get_pr_file_content(path or file.filename, sha)
+        file_path = path or file.filename
+        cache = getattr(self, "_revision_file_contents", None)
+        if cache is None:
+            cache = self._revision_file_contents = {}
+        key = (self.repo, sha, file_path)
+        if key in cache:
+            return cache[key]
+        content = self.get_pr_file_content(file_path, sha)
+        if content:
+            cache[key] = content
+        return content
 
     def publish_labels(self, pr_types):
         try:
