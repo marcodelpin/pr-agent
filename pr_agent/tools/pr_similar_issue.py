@@ -333,9 +333,11 @@ class PRSimilarIssue:
 
                 indexed_ids = set()
                 if issues_to_scan:
+                    issue_ids = ", ".join(f"'issue_{issue.number}.issue'" for issue in issues_to_scan)
+                    # Do not cap rows at the candidate count because duplicate IDs can exist.
                     rows = self.table.search().limit(len(self.table)).where(
-                        f"metadata.repo='{repo_name_for_index}'"
-                    ).select(["id", "metadata"]).to_list()
+                        f"metadata.repo='{repo_name_for_index}' AND id IN ({issue_ids})"
+                    ).select(["id"]).to_list()
                     indexed_ids = {row['id'] for row in rows}
                 issues_to_update = [
                     issue for issue in issues_to_scan if f"issue_{issue.number}.issue" not in indexed_ids
@@ -488,7 +490,7 @@ class PRSimilarIssue:
         get_logger().info('Getting issue...')
         repo_name, original_issue_number = self.git_provider._parse_issue_url(self.issue_url.split('=')[-1])
         issue_main = self.git_provider.repo_obj.get_issue(original_issue_number)
-        issue_str, comments, number = self._process_issue(issue_main)
+        issue_str, _, _ = self._process_issue(issue_main, include_comments=False)
         get_logger().info('Done')
 
         get_logger().info('Querying...')
@@ -554,11 +556,11 @@ class PRSimilarIssue:
         get_logger().info(similar_issues_str)
         get_logger().info("Done")
 
-    def _process_issue(self, issue):
+    def _process_issue(self, issue, *, include_comments=True):
         header = issue.title
         body = issue.body
         number = issue.number
-        if get_settings().pr_similar_issue.skip_comments:
+        if not include_comments or get_settings().pr_similar_issue.skip_comments:
             comments = []
         else:
             comments = list(issue.get_comments())

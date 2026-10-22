@@ -329,10 +329,6 @@ class PRReviewer:
                                 'config': dict(get_settings().config)}
             get_logger().debug("Relevant configs", artifacts=relevant_configs)
 
-            # ticket extraction if exists
-            await extract_and_cache_pr_tickets(self.git_provider, self.vars)
-            self._raw_prompt_vars = copy.deepcopy(self.vars)
-
             if (
                 self.incremental.is_incremental
                 and hasattr(self.git_provider, "unreviewed_files_map")
@@ -346,6 +342,10 @@ class PRReviewer:
                     self.git_provider.publish_comment(f"Incremental Review Skipped\n"
                                     f"No files were changed since the [previous PR Review]({previous_review_url})")
                 return None
+
+            # ticket extraction if exists
+            await extract_and_cache_pr_tickets(self.git_provider, self.vars)
+            self._raw_prompt_vars = copy.deepcopy(self.vars)
 
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 progress_response = self.git_provider.publish_comment(
@@ -1331,6 +1331,11 @@ class PRReviewer:
                     "total_tokens": details.total_tokens,
                 }
             structured_data["usage"] = usage
+            # The lists the review coverage footer shows, for a consumer that never sees the comment.
+            structured_data["coverage"] = {
+                "files_not_reviewed": list(self.remaining_files_list or []),
+                "files_partially_reviewed": list(self.partial_files_list or []),
+            }
             self._structured_review_data = structured_data
             if callable(structured_publisher):
                 structured_publisher(structured_data)

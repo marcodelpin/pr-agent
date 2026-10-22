@@ -90,7 +90,7 @@ def return_document_headings(text: str, ext: str) -> str:
         lines = text.split('\n')
         headings = set()
 
-        if not text or not re.search(r'[a-zA-Z]', text):
+        if not text or not any(char.isalpha() for char in text):
             get_logger().error(f"Empty or non text content found in text: {text}.")
             return ""
 
@@ -134,7 +134,7 @@ def map_documentation_files_to_contents(base_path: str, doc_files: list[str],
                 with open(file, encoding='utf-8') as f:
                     content = f.read()
                     # Skip files with no text content
-                    if not re.search(r'[a-zA-Z]', content):
+                    if not any(char.isalpha() for char in content):
                         continue
                     if len(content) > max_allowed_file_len:
                         get_logger().warning(
@@ -568,6 +568,7 @@ class PRHelpDocs:
                             for file in files:
                                 if file.lower().startswith("readme."):
                                     doc_files.append(os.path.join(root, file))
+                        break
                 # Resolve docs_path against the clone root and refuse paths that escape it:
                 # an absolute or traversing docs_path (e.g. an attacker-controlled per-directory
                 # setting) must never read host files into the prompt.

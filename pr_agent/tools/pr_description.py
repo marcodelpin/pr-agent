@@ -390,6 +390,7 @@ class PRDescription:
                     patches_diff,
                     prompt="pr_description_prompt",
                 )
+                self._require_usable_prediction(self.prediction)
 
                 # extend the prediction with additional files not shown
                 if get_settings().pr_description.enable_semantic_files_types:
@@ -569,7 +570,11 @@ class PRDescription:
             get_logger().debug("PR diff only description", artifact=files_walkthrough_prompt)
             prediction_headers = await self._get_prediction(model, patches_diff=files_walkthrough_prompt,
                                                             prompt="pr_description_only_description_prompts")
-            prediction_headers = prediction_headers.strip().removeprefix('```yaml').strip('`').strip()
+            if isinstance(prediction_headers, str):
+                prediction_headers = re.sub(
+                    r'^```[ \t]*(?:(?i:yaml|yml)[ \t]*)?(?=\r?\n)', '', prediction_headers.strip()
+                ).strip('`').strip()
+            self._require_usable_prediction(prediction_headers)
 
             # extend the tables with the files not shown
             files_walkthrough_extended = await self.extend_uncovered_files(files_walkthrough)
@@ -767,6 +772,11 @@ class PRDescription:
         )
 
         return response
+
+    def _require_usable_prediction(self, prediction: str) -> None:
+        parsed = load_yaml(prediction.strip(), keys_fix_yaml=self.keys_fix) if isinstance(prediction, str) else None
+        if not isinstance(parsed, dict) or not parsed:
+            raise FallbackEligibleError("The /describe model returned no usable YAML mapping")
 
     def _prepare_data(self):
         # Load the AI prediction data into a dictionary
@@ -1039,6 +1049,7 @@ class PRDescription:
             # header += "&nbsp; " * delta
             pr_body += f"""<thead><tr><th></th><th align="left">{header}</th></tr></thead>"""
             pr_body += """<tbody>"""
+            diff_files_by_name = None
             for semantic_label in value.keys():
                 s_label = semantic_label.strip("'").strip('"')
                 pr_body += f"""<tr><td><strong>{s_label.capitalize()}</strong></td>"""
@@ -1063,16 +1074,19 @@ class PRDescription:
                         filename_publish = f"<strong>{filename_publish}</strong>"
                     diff_plus_minus = ""
                     delta_nbsp = ""
-                    diff_files = self.git_provider.get_diff_files()
-                    for f in diff_files:
-                        if f.filename.lower().strip('/') == filename.lower().strip('/'):
-                            num_plus_lines = f.num_plus_lines
-                            num_minus_lines = f.num_minus_lines
-                            diff_plus_minus += f"+{num_plus_lines}/-{num_minus_lines}"
-                            if len(diff_plus_minus) > 12 or diff_plus_minus == "+0/-0":
-                                diff_plus_minus = "[link]"
-                            delta_nbsp = "&nbsp; " * max(0, (8 - len(diff_plus_minus)))
-                            break
+                    if diff_files_by_name is None:
+                        diff_files_by_name = {}
+                        for diff_file in self.git_provider.get_diff_files():
+                            # Preserve the first match when normalized paths collide.
+                            diff_files_by_name.setdefault(diff_file.filename.lower().strip('/'), diff_file)
+                    f = diff_files_by_name.get(filename.lower().strip('/'))
+                    if f is not None:
+                        num_plus_lines = f.num_plus_lines
+                        num_minus_lines = f.num_minus_lines
+                        diff_plus_minus += f"+{num_plus_lines}/-{num_minus_lines}"
+                        if len(diff_plus_minus) > 12 or diff_plus_minus == "+0/-0":
+                            diff_plus_minus = "[link]"
+                        delta_nbsp = "&nbsp; " * max(0, (8 - len(diff_plus_minus)))
 
                     # try to add line numbers link to code suggestions
                     link = ""
