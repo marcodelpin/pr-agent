@@ -343,8 +343,14 @@ class GithubProvider(GitProvider):
             self.comments = list(self.pr.get_issue_comments())
         identifiers = get_pr_review_comment_identifiers(full=full, incremental=incremental)
         for index in range(len(self.comments) - 1, -1, -1):
-            if comment_matches_any_identity(self.comments[index].body, identifiers):
-                return self.comments[index]
+            comment = self.comments[index]
+            if not comment_matches_any_identity(comment.body, identifiers):
+                continue
+            try:
+                if self.is_comment_authored_by_pr_agent(comment):
+                    return comment
+            except RuntimeError:
+                get_logger().debug("Could not verify the author of a GitHub review anchor")
         return None
 
     @staticmethod
@@ -613,7 +619,8 @@ class GithubProvider(GitProvider):
                                    final_update_message=True,
                                    as_thread: bool = False,
                                    identity_marker: str | None = None,
-                                   legacy_initial_header: str | None = None):
+                                   legacy_initial_header: str | None = None,
+                                   require_agent_authorship: bool = False):
         if get_settings().github.publish_as_check_run:
             if self._publish_check_run(pr_comment, name):
                 return
@@ -626,6 +633,7 @@ class GithubProvider(GitProvider):
             as_thread=as_thread,
             identity_marker=identity_marker,
             legacy_initial_header=legacy_initial_header,
+            require_agent_authorship=require_agent_authorship,
         )
 
     def supports_review_comment_identity(self) -> bool:
@@ -1060,6 +1068,16 @@ class GithubProvider(GitProvider):
     def supports_thread_resolution(self) -> bool:
         return True
 
+    def _post_graphql(self, query: str) -> tuple[int, dict, str]:
+        """POST a GraphQL document and return PyGithub's raw ``(status, headers, body)``.
+
+        PyGithub resolves a relative path under the REST prefix, so "/graphql" becomes "/api/v3/graphql"
+        on GitHub Enterprise Server. ``graphql_url`` is the endpoint PyGithub derives from ``base_url``
+        instead: "/api/graphql" there and "/graphql" on github.com.
+        """
+        requester = self.github_client._Github__requester
+        return requester.requestJson("POST", requester.graphql_url, input={"query": query})
+
     def _review_thread_nodes(self, *, root_only: bool = False):
         """List review threads, optionally fetching only their root comment IDs."""
         owner, repo_name = self.repo.split("/")
@@ -1201,9 +1219,7 @@ class GithubProvider(GitProvider):
                 }}
             }}
             """
-            resolve_tuple = self.github_client._Github__requester.requestJson(
-                "POST", "/graphql", input={"query": mutation}
-            )
+            resolve_tuple = self._post_graphql(mutation)
             if not isinstance(resolve_tuple, tuple) or len(resolve_tuple) != 3:
                 get_logger().error(f"Unexpected mutation response format for thread {thread_id}: {type(resolve_tuple)}")
                 return False
@@ -1578,13 +1594,16 @@ class GithubProvider(GitProvider):
             return self._list_config_tree_paths(repo, tree_sha), commit_sha
 
     def _list_config_tree_paths(self, repo, ref: str) -> list[str]:
-        """Fetch a recursive tree at *ref* and return its `.pr_agent.toml` blob paths.
+        """Reuse the latest immutable tree's `.pr_agent.toml` blob paths within this provider.
 
         A truncated tree (GitHub caps recursive trees at 100k entries / 7 MB and sets
         ``truncated``) cannot be trusted to name every config, so it degrades to no
         per-directory settings with a warning rather than applying an incomplete, silent
         subset. The root config is unaffected.
         """
+        cached = getattr(self, "_repo_settings_tree_cache", None)
+        if cached is not None and cached[0] is repo and cached[1] == ref:
+            return list(cached[2])
         tree = repo.get_git_tree(ref, recursive=True)
         if getattr(tree, "truncated", False):
             get_logger().warning(
@@ -1592,7 +1611,10 @@ class GithubProvider(GitProvider):
                 "limit; skipping per-directory settings for this repository"
             )
             return []
-        return self._extract_config_tree_paths(tree)
+        paths = self._extract_config_tree_paths(tree)
+        # Retain only filtered paths from one tree, not the full API response.
+        self._repo_settings_tree_cache = (repo, ref, tuple(paths))
+        return paths
 
     @staticmethod
     def _extract_config_tree_paths(tree) -> list[str]:
@@ -2198,8 +2220,7 @@ class GithubProvider(GitProvider):
                 }}
             }}
             """
-            response_tuple = self.github_client._Github__requester.requestJson("POST", "/graphql",
-                                                                               input={"query": query})
+            response_tuple = self._post_graphql(query)
 
             if isinstance(response_tuple, tuple) and len(response_tuple) == 3:
                 response_json = json.loads(response_tuple[2])

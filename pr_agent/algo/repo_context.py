@@ -170,14 +170,21 @@ def _sibling_repo_context_entries(context_files: list) -> list[tuple[str, str]]:
     return sibling_entries
 
 
+def _is_repo_context_path_allowed(path: str) -> bool:
+    """Return whether a repo-context path stays inside the repository."""
+    if path.startswith("/"):
+        return False
+    return all(segment != ".." for segment in path.split("/"))
+
+
 def _parse_repo_context_file_entry(entry: str | dict) -> tuple[str | None, str]:
     """Parse a repo-context entry into (sibling repo id, file path).
 
     A string entry is always a file path in the current repository and yields (None, path).
     A sibling entry is a structured ``{"repo_id": ..., "file_path": ...}`` dict naming a
     repository in the same namespace/owner (GitLab: ``group/subgroup/project``, GitHub:
-    ``owner/repo``); its file is read from the sibling's default branch. A malformed entry
-    yields (None, "") and is skipped by the loader.
+    ``owner/repo``); its file is read from the sibling's default branch. A malformed or
+    escaping entry yields (None, "") and is skipped by the loader.
     """
     if isinstance(entry, dict):
         repo_id = entry.get("repo_id")
@@ -185,13 +192,16 @@ def _parse_repo_context_file_entry(entry: str | dict) -> tuple[str | None, str]:
         if not isinstance(repo_id, str) or not isinstance(file_path, str):
             return None, ""
         repo_id = repo_id.strip().strip("/")
-        file_path = file_path.strip().lstrip("/")
-        if not repo_id or not file_path:
+        file_path = file_path.strip()
+        if not repo_id or not file_path or not _is_repo_context_path_allowed(file_path):
             return None, ""
         return repo_id, file_path
     if not isinstance(entry, str):
         return None, ""
-    return None, entry.strip()
+    file_path = entry.strip()
+    if not _is_repo_context_path_allowed(file_path):
+        return None, ""
+    return None, file_path
 
 
 def _get_provider_repo_context_cache(git_provider) -> _RepoContextCache:
@@ -275,21 +285,28 @@ def _is_glob_entry(entry) -> bool:
     return isinstance(entry, str) and any(character in entry for character in _GLOB_CHARACTERS)
 
 
-def _expand_glob_entries(git_provider, context_files: list, from_default_branch: bool) -> tuple[list, bool]:
-    """Replace local ``dir/*.md``-style entries with the matching file paths, sorted by name.
+def _expand_glob_entries(git_provider, context_files: list, from_default_branch: bool, *, state):
+    """Yield local entries, expanding ``dir/*.md``-style entries into sorted file paths on demand.
 
     Only the file-name part may hold wildcards, so each entry costs one directory listing.
     Sibling entries are not expanded.
     """
     expanded = []
-    had_fetch_error = False
     max_matches = _read_max_glob_matches()
     for entry in context_files:
         if not _is_glob_entry(entry):
             if not (isinstance(entry, str) and entry.strip().lstrip("/") in expanded):
                 expanded.append(entry)
+                yield entry
             continue
-        dir_path, _, name_pattern = entry.strip().lstrip("/").rpartition("/")
+        raw_entry = entry.strip()
+        if not _is_repo_context_path_allowed(raw_entry):
+            get_logger().warning(
+                "Skipping repo context glob with an absolute path or '..' segment",
+                artifact={"pattern": entry},
+            )
+            continue
+        dir_path, _, name_pattern = raw_entry.rpartition("/")
         if any(character in dir_path for character in _GLOB_CHARACTERS) or not name_pattern:
             get_logger().warning(
                 "Skipping repo context glob: only the file-name part may contain wildcards",
@@ -299,7 +316,7 @@ def _expand_glob_entries(git_provider, context_files: list, from_default_branch:
         try:
             listed = git_provider.list_repo_directory(dir_path, from_default_branch=from_default_branch)
         except Exception as e:
-            had_fetch_error = True
+            state.had_fetch_error = True
             get_logger().warning(f"Failed to list repo context directory: {dir_path}", artifact={"error": str(e)})
             continue
         if listed is None:
@@ -316,8 +333,10 @@ def _expand_glob_entries(git_provider, context_files: list, from_default_branch:
                 artifact={"pattern": entry},
             )
             matches = matches[:max_matches]
-        expanded.extend(path for path in matches if path not in expanded)
-    return expanded, had_fetch_error
+        for path in matches:
+            if path not in expanded:
+                expanded.append(path)
+                yield path
 
 
 class _RepoContextLoadState:
@@ -333,8 +352,7 @@ def _iter_repo_context_files(
         state = _RepoContextLoadState()
     if from_default_branch is None:
         from_default_branch = _read_bool_setting("repo_context_from_default_branch", default=True)
-    context_files, glob_had_fetch_error = _expand_glob_entries(git_provider, context_files, from_default_branch)
-    state.had_fetch_error = state.had_fetch_error or glob_had_fetch_error
+    context_files = _expand_glob_entries(git_provider, context_files, from_default_branch, state=state)
     # Ordered (label, content) entries rather than a label-keyed dict: a local path can equal a
     # sibling's rendered label, and a label-keyed mapping would silently drop one of them.
     max_siblings = _read_max_sibling_context_files()
@@ -481,7 +499,7 @@ def render_instruction_files(files: dict[str, str] | list[tuple[str, str]]) -> s
 
 
 def render_instruction_files_with_line_budget(
-    files: dict[str, str] | list[tuple[str, str]], max_lines: int
+    files: dict[str, str] | list[tuple[str, str]], max_lines: int, *, require_next_content_line: bool = False
 ) -> str:
     parts = [
         INSTRUCTION_FILES_INTRO,
@@ -521,8 +539,10 @@ def render_instruction_files_with_line_budget(
 
         parts.extend(file_footer)
 
-        # Stop before advancing a lazy iterator when even an empty next file cannot fit.
+        # The lazy file iterator should not fetch entries that cannot contribute content.
         minimum_next_file_lines = len(file_header) + len(file_footer) + 1
+        if require_next_content_line:
+            minimum_next_file_lines += 1
         if max_lines - len(parts) < minimum_next_file_lines:
             break
 
@@ -580,7 +600,7 @@ def build_repo_context(git_provider) -> str:
     files = _iter_repo_context_files(
         git_provider, context_files, from_default_branch, state=load_state
     )
-    repo_context = render_instruction_files_with_line_budget(files, max_lines)
+    repo_context = render_instruction_files_with_line_budget(files, max_lines, require_next_content_line=True)
     if not load_state.had_content:
         repo_context = ""
 
