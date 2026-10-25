@@ -21,6 +21,7 @@ from gitlab import (
 from requests.exceptions import RequestException
 
 from pr_agent.agent.request_policy import policy_metadata, policy_value
+from pr_agent.algo.setting_utils import _as_bool_setting
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 
 from ..algo.comment_identity import (
@@ -584,7 +585,7 @@ class GitLabProvider(GitProvider):
         Soft-fail on any issue.
         """
         try:
-            if not bool(get_settings().get("GITLAB.EXPAND_SUBMODULE_DIFFS", False)):
+            if not _as_bool_setting(get_settings().get("GITLAB.EXPAND_SUBMODULE_DIFFS", False)):
                 return changes
         except (AttributeError, KeyError, TypeError):
             return changes
@@ -1365,13 +1366,13 @@ class GitLabProvider(GitProvider):
         return f"{self.mr.web_url}#note_{comment.id}"
 
     def should_publish_review_as_thread(self) -> bool:
-        return bool(get_settings().get("GITLAB.PUBLISH_REVIEW_AS_THREAD", False))
+        return _as_bool_setting(get_settings().get("GITLAB.PUBLISH_REVIEW_AS_THREAD", False))
 
     def should_publish_improve_as_thread(self) -> bool:
-        return bool(get_settings().get("GITLAB.PUBLISH_IMPROVE_AS_THREAD", False))
+        return _as_bool_setting(get_settings().get("GITLAB.PUBLISH_IMPROVE_AS_THREAD", False))
 
     def should_reply_to_trigger_comment(self) -> bool:
-        return bool(get_settings().get("GITLAB.REPLY_TO_TRIGGER_COMMENT", False))
+        return _as_bool_setting(get_settings().get("GITLAB.REPLY_TO_TRIGGER_COMMENT", False))
 
     def supports_review_comment_identity(self) -> bool:
         return True
@@ -2380,12 +2381,13 @@ class GitLabProvider(GitProvider):
             else:
                 ref = getattr(self.mr, "target_branch", None) or self._project_default_branch()
             paths = []
-            # Bound the listing at ten pages of 100 entries.
             for page in range(1, 11):
                 tree = project.repository_tree(path=dir_path, ref=ref, recursive=False, page=page, per_page=100)
                 paths.extend(entry["path"] for entry in tree if entry.get("type") == "blob")
                 if len(tree) < 100:
                     break
+            else:
+                get_logger().warning(f"GitLab directory listing stopped at 1,000 entries: {dir_path}")
             return paths
         except GitlabGetError as e:
             if getattr(e, "response_code", None) == 404:

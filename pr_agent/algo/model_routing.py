@@ -17,15 +17,18 @@ def count_hunks(diff_files: list[FilePatchInfo]) -> int:
     total = 0
     for diff_file in diff_files:
         patch = getattr(diff_file, "patch", "") or ""
-        if not patch.strip():
+        if not patch or patch.isspace():
             continue
-        total += sum(1 for line in patch.splitlines() if line.startswith("@@")) or 1
+        # Git delimits diff lines with LF; other separators may occur in source text.
+        total += (patch.count("\n@@") + patch.startswith("@@")) or 1
     return total
 
 
 def _limit(rule, key: str) -> int | None:
     value = rule.get(key)
     if value is None or value == "":
+        return None
+    if isinstance(value, bool):
         return None
     return int(value)
 
