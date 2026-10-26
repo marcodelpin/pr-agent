@@ -611,7 +611,7 @@ max_skills_tokens = 8000 # token budget for the combined skills_context block
 [artifacts]
 # Enable artifact injection into tool prompts (off by default; auto-enabled when artifact_path input is set)
 enable = false
-# File path to the artifact (relative to GITHUB_WORKSPACE, or absolute)
+# File path or list of paths to artifacts (relative to GITHUB_WORKSPACE, or absolute)
 artifact_path = ""
 # Analysis guidance rendered separately before the untrusted artifact label and content (leave empty for a sensible default)
 artifact_instructions = ""
@@ -631,6 +631,7 @@ bearer_tokens = {} # principal names to distinct bearer secrets; empty permits a
 routing_scan_max_chars = 65536 # positive character limit for PR URL and command detection; does not truncate diffs
 health_timeout_seconds = 10 # finite positive seconds for cooperative health-probe work; excludes synchronous initialization and blocking SDK work
 context_history_max_tasks = 100 # maximum prior tasks considered for a context follow-up; set from 1 to 1000
+task_store_max_tasks_per_owner = 1000 # maximum retained MOSAICO tasks per owner; evicted tasks lose follow-up history
 
 [asana]
 request_timeout = 10 # seconds allowed for each Asana task API request
