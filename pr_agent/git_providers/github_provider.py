@@ -175,12 +175,6 @@ class GithubProvider(GitProvider):
                                    f"belonging to owner/repo: {repo_name}")
             return None
 
-    def reset_diff_cache_for_command(self) -> None:
-        self.diff_files = None
-        if context.exists():
-            context.pop("diff_files", None)
-        self.incremental = IncrementalPR(False)
-
     def get_incremental_commits(self, incremental: IncrementalPR | None = None):
         # Constructed per call: a default in the signature is one object shared by every provider that omits it.
         # Invalidate completed diffs when the file scope is being reconfigured.
@@ -316,7 +310,15 @@ class GithubProvider(GitProvider):
             # Get all files changed during the commit range
 
             for commit in self.incremental.commits_range:
-                if commit.commit.message.startswith(f"Merge branch '{self._get_repo().default_branch}'"):
+                raw_data = getattr(commit, "_rawData", None)
+                parents = raw_data.get("parents") if isinstance(raw_data, dict) else None
+                if parents is None:
+                    parents = getattr(commit, "parents", None)
+                is_merge_commit = parents is not None and len(parents) > 1
+                if not is_merge_commit:
+                    message = getattr(getattr(commit, "commit", None), "message", "")
+                    is_merge_commit = message.startswith(f"Merge branch '{self._get_repo().default_branch}'")
+                if is_merge_commit:
                     get_logger().info(f"Skipping merge commit {commit.commit.message}")
                     continue
                 self.unreviewed_files_map.update({

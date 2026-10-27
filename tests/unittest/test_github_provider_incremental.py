@@ -95,6 +95,7 @@ def test_incremental_commit_files_keep_300_item_pages():
     requester.requestJsonAndCheck.side_effect = fetch_page
     commit = Commit(requester, {}, {
         "url": commit_url, "sha": "pushed", "commit": {"message": "Change files"},
+        "parents": [{"sha": "reviewed"}],
     }, completed=False)
     provider = _make_provider([commit])
     provider.incremental.last_seen_commit = SimpleNamespace(sha="reviewed")
@@ -107,6 +108,24 @@ def test_incremental_commit_files_keep_300_item_pages():
 
     assert list(provider.unreviewed_files_map) == [file["filename"] for file in all_files]
     assert requester.requestJsonAndCheck.call_count == 2
+
+
+def test_incremental_review_skips_merge_commits_regardless_of_message():
+    merge_commit = Commit(Mock(), {}, {
+        "url": "https://api.github.com/repos/example/project/commits/merge",
+        "sha": "merge",
+        "commit": {"message": "Sync target branch"},
+        "parents": [{"sha": "base"}, {"sha": "target"}],
+    }, completed=False)
+    provider = _make_provider([merge_commit])
+    provider.incremental.last_seen_commit = SimpleNamespace(sha="reviewed")
+    provider.get_previous_review = lambda **kwargs: provider.previous_review
+    provider.get_commit_range = lambda: [merge_commit]
+    provider.unreviewed_files_map = {}
+
+    provider._get_incremental_commits()
+
+    assert provider.unreviewed_files_map == {}
 
 
 def test_previous_review_ignores_matching_comment_from_another_user():

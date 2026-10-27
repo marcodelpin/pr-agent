@@ -185,6 +185,8 @@ class PRDescription:
             else:
                 get_logger().debug("Publishing labels disabled")
 
+            # Preserve labels before rendering can remove them from model data.
+            label_data = {"labels": self.data["labels"]} if "labels" in (self.data or {}) else {}
             if get_settings().pr_description.use_description_markers:
                 pr_title, pr_body = self._prepare_pr_answer_with_markers()
             else:
@@ -235,7 +237,9 @@ class PRDescription:
             if get_settings().config.publish_output:
                 # Emit to the optional external sinks before touching the provider, so a sink
                 # still receives the description if publishing it to the PR fails.
-                await push_outputs_async("describe", payload=self._prepare_output_payload(), markdown=pr_body)
+                await push_outputs_async(
+                    "describe", payload=self._prepare_output_payload(pr_title, label_data), markdown=pr_body
+                )
 
                 # publish labels
                 if (
@@ -649,6 +653,11 @@ class PRDescription:
             # extend the prediction with additional files not included in the original prediction
             pr_files = self.git_provider.get_diff_files()
             prediction_extra = "pr_files:"
+            extra_file_summary = ""
+            overflow_summary = ""
+            if self.vars.get("include_file_summary_changes", True):
+                extra_file_summary = "  changes_summary: |\n    No detailed description available."
+                overflow_summary = "  changes_summary: |\n    Additional changed files are omitted from this table."
             MAX_EXTRA_FILES_TO_OUTPUT = 100
             counter_extra_files = 0
             for file in pr_files:
@@ -658,13 +667,14 @@ class PRDescription:
                 # add up to MAX_EXTRA_FILES_TO_OUTPUT files
                 counter_extra_files += 1
                 if counter_extra_files > MAX_EXTRA_FILES_TO_OUTPUT:
-                    extra_file_yaml = """\
+                    extra_file_yaml = f"""\
 - filename: |
     Additional files not shown
   changes_title: |
     ...
   label: |
     additional files
+{overflow_summary}
 """
                     prediction_extra = prediction_extra + "\n" + extra_file_yaml.strip()
                     get_logger().debug(f"Too many remaining files, clipping to {MAX_EXTRA_FILES_TO_OUTPUT}")
@@ -677,6 +687,7 @@ class PRDescription:
     ...
   label: |
     additional files
+{extra_file_summary}
 """
                 prediction_extra = prediction_extra + "\n" + extra_file_yaml.strip()
 
@@ -849,9 +860,9 @@ class PRDescription:
             return False
         return True
 
-    def _prepare_output_payload(self) -> dict:
-        """Filter generated label fields for external sinks without mutating model data."""
-        payload = dict(self.data or {})
+    def _prepare_output_payload(self, title: str, label_data: dict) -> dict:
+        """Restore the selected title and labels, keeping rendered field omissions and label filtering."""
+        payload = {**(self.data or {}), **label_data, "title": title}
         for field in ("labels", "type"):
             if field not in payload:
                 continue
@@ -1011,6 +1022,8 @@ class PRDescription:
                 changes_walkthrough += f"{changes_walkthrough_table}\n\n"
                 changes_walkthrough += "</details>\n\n"
             elif key.lower().strip() == 'description':
+                if value is None:
+                    value = ''
                 if isinstance(value, list):
                     value = ', '.join(v.rstrip() for v in value)
                 # Makes the bullet points more readable by adding double space

@@ -641,7 +641,10 @@ def ticket_markdown_logic(emoji, markdown_text, value, gfm_supported) -> str:
                 compliance_emoji = '✅'
             elif any(level == 'Not compliant' for level in all_compliance_levels):
                 # If there's a mix of compliant and non-compliant tickets
-                if any(level in ['Fully compliant', 'PR Code Verified'] for level in all_compliance_levels):
+                if any(
+                    level in ['Fully compliant', 'PR Code Verified', 'Partially compliant']
+                    for level in all_compliance_levels
+                ):
                     compliance_level = 'Partially compliant'
                     compliance_emoji = '🔶'
                 else:
@@ -750,11 +753,20 @@ def load_large_diff(filename, new_file_content_str: str,
             new_file_content_str += "\n"
         if original_file_content_str == new_file_content_str:
             return ""
+        if get_verbosity_level() >= 2 and show_warning:
+            get_logger().info(f"File was modified, but no patch was found. Manually creating patch: {filename}.")
+        if not original_file_content_str or not new_file_content_str:
+            content = new_file_content_str or original_file_content_str
+            line_count = content.count("\n")
+            line_range = "1" if line_count == 1 else f"1,{line_count}"
+            if new_file_content_str:
+                header, prefix = f"@@ -0,0 +{line_range} @@\n", "+"
+            else:
+                header, prefix = f"@@ -{line_range} +0,0 @@\n", "-"
+            return header + prefix + content.replace("\n", "\n" + prefix)[:-1]
         original_lines = list(StringIO(original_file_content_str, newline="\n"))
         new_lines = list(StringIO(new_file_content_str, newline="\n"))
         diff = difflib.unified_diff(original_lines, new_lines)
-        if get_verbosity_level() >= 2 and show_warning:
-            get_logger().info(f"File was modified, but no patch was found. Manually creating patch: {filename}.")
         return to_hunk_only_patch(''.join(diff))
     except Exception:
         get_logger().exception(f"Failed to generate patch for file: {filename}")
@@ -1433,15 +1445,13 @@ def find_line_number_of_relevant_line_in_file(diff_files: list[FilePatchInfo],
                             continue
                     elif skip_hunk:
                         continue
+                    elif line.startswith((' ', '+')):
+                        delta += 1
+                        if start2 + delta - 1 == absolute_position:
+                            position = i
+                            break
                     elif not line.startswith('-'):
                         delta += 1
-
-                    #
-                    absolute_position_curr = start2 + delta - 1
-
-                    if absolute_position_curr == absolute_position:
-                        position = i
-                        break
             elif not relevant_line_in_file:
                 get_logger().warning("Cannot locate an empty relevant line in a patch",
                                      artifact={"relevant_file": relevant_file})
@@ -1470,7 +1480,7 @@ def find_line_number_of_relevant_line_in_file(diff_files: list[FilePatchInfo],
                         elif not line.startswith('-'):
                             scan_delta += 1
 
-                        if not line.startswith('-') and is_match(line):
+                        if line.startswith((' ', '+')) and is_match(line):
                             return i, scan_start2 + scan_delta - 1
                     return -1, absolute_position
 
@@ -1478,7 +1488,7 @@ def find_line_number_of_relevant_line_in_file(diff_files: list[FilePatchInfo],
                 position, absolute_position = scan_patch_lines(
                     lambda line, rl=relevant_line_in_file: line == rl or line[1:] == rl)
                 if position == -1:
-                    fuzzy_match_candidates = [line for line in patch_lines if line != NO_NEWLINE_AT_EOF_MARKER]
+                    fuzzy_match_candidates = [line for line in patch_lines if line.startswith((' ', '+'))]
                     if relevant_line_in_file not in fuzzy_match_candidates:
                         matches_difflib: list[str | Any] = difflib.get_close_matches(
                             relevant_line_in_file, fuzzy_match_candidates, n=3, cutoff=0.93
@@ -1513,7 +1523,7 @@ def find_line_number_of_relevant_line_in_file(diff_files: list[FilePatchInfo],
                         elif not line.startswith('-'):
                             delta += 1
 
-                        if no_plus_line in line and line[0] != '-':
+                        if line.startswith((' ', '+')) and no_plus_line in line:
                             # The model might add a '+' to the beginning of the relevant_line_in_file even if originally
                             # it's a context line
                             position = i
