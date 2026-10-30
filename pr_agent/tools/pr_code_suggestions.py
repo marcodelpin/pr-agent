@@ -15,6 +15,7 @@ from pr_agent.algo.comment_identity import (
     PRCodeSuggestionsHeader,
     PRCodeSuggestionsIdentity,
     add_comment_identity,
+    comment_authorship_available,
     comment_matches_identity,
     format_pr_code_suggestions_header,
     hidden_marker_forms,
@@ -400,6 +401,8 @@ class PRCodeSuggestions:
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping code suggestions")
                 return None
 
+            await asyncio.to_thread(self.git_provider.get_diff_files)
+
             get_logger().info('Generating code suggestions for PR...')
             relevant_configs = {'pr_code_suggestions': dict(get_settings().pr_code_suggestions),
                                 'config': dict(get_settings().config)}
@@ -592,7 +595,7 @@ class PRCodeSuggestions:
                     try:
                         if not self.progress_response:
                             self.git_provider.remove_initial_comment()
-                        self.git_provider.publish_comment("Failed to generate code suggestions for PR")
+                        self.git_provider.publish_tool_failure("improve", "Failed to generate code suggestions for PR")
                     except Exception as publish_error:
                         get_logger().exception(f"Failed to update persistent review, error: {publish_error}")
             # The status of the whole run must not read as success just because the error stopped here.
@@ -808,6 +811,8 @@ class PRCodeSuggestions:
             if git_provider._publish_check_run(pr_comment, name):
                 return progress_response if _clean_up_progress_note() else None
 
+        require_agent_authorship = comment_authorship_available(git_provider)
+
         if _supports_code_suggestion_state(git_provider) and max_previous_comments <= 0:
             result = GitProvider.publish_persistent_comment_full(
                 git_provider,
@@ -819,6 +824,7 @@ class PRCodeSuggestions:
                 as_thread=as_thread,
                 identity_marker=identity_marker,
                 legacy_initial_header=legacy_initial_header,
+                require_agent_authorship=require_agent_authorship,
                 fallback_on_error=False,
             )
             if result is not None:
@@ -880,15 +886,20 @@ class PRCodeSuggestions:
                 legacy_comment = None
                 for candidate in git_provider.get_issue_comments_newest_first():
                     body = _comment_body(candidate)
-                    if identity_marker:
-                        if comment_matches_identity(body, identity_marker):
-                            comment = candidate
-                            break
-                        if legacy_comment is None and _is_legacy_suggestions_comment(body):
-                            legacy_comment = candidate
-                    elif comment_matches_identity(body, initial_header):
+                    matches_identity = comment_matches_identity(body, identity_marker or initial_header)
+                    matches_legacy = (
+                        identity_marker
+                        and legacy_comment is None
+                        and _is_legacy_suggestions_comment(body)
+                    )
+                    if not (matches_identity or matches_legacy):
+                        continue
+                    if require_agent_authorship and not git_provider.is_comment_authored_by_pr_agent(candidate):
+                        continue
+                    if matches_identity:
                         comment = candidate
                         break
+                    legacy_comment = candidate
                 if comment is None and identity_marker:
                     comment = legacy_comment
                 if comment:
@@ -1018,12 +1029,15 @@ class PRCodeSuggestions:
             OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD,
             preserve_minimum=True,
         )
-        self.patches_diff = get_pr_diff(self.git_provider,
-                                        self._suggestion_attempt_budget.token_handler,
-                                        model,
-                                        add_line_numbers_to_hunks=True,
-                                        disable_extra_lines=False,
-                                        output_token_reserve=output_token_reserve)
+        self.patches_diff = await asyncio.to_thread(
+            get_pr_diff,
+            self.git_provider,
+            self._suggestion_attempt_budget.token_handler,
+            model,
+            add_line_numbers_to_hunks=True,
+            disable_extra_lines=False,
+            output_token_reserve=output_token_reserve,
+        )
         self.patches_diff_list = [self.patches_diff]
         self.patches_diff_no_line_number = self.remove_line_numbers([self.patches_diff])[0]
 
@@ -1318,7 +1332,8 @@ class PRCodeSuggestions:
                                            'relevant_lines_end': relevant_lines_end})
             return False
         if diff_file.head_file and getattr(diff_file, "head_file_is_complete", True):
-            range_resolvable = relevant_lines_end <= len(split_diff_lines(diff_file.head_file))
+            line_count = diff_file.head_file.count("\n") + (not diff_file.head_file.endswith("\n"))
+            range_resolvable = relevant_lines_end <= line_count
         else:
             range_resolvable = self._get_patch_range_lines(
                 diff_file.patch, relevant_lines_start, relevant_lines_end) is not None
@@ -1373,8 +1388,12 @@ class PRCodeSuggestions:
                     get_logger().debug(f"Skipping suggestion {i + 1}, because it is a duplicate: {suggestion}")
                     continue
 
-                if 'const' in suggestion['suggestion_content'] and 'instead' in suggestion[
-                    'suggestion_content'] and 'let' in suggestion['suggestion_content']:
+                suggestion_content = suggestion['suggestion_content']
+                if (
+                    'instead' in suggestion_content
+                    and re.search(r"\bconst\b", suggestion_content)
+                    and re.search(r"\blet\b", suggestion_content)
+                ):
                     get_logger().debug(
                         f"Skipping suggestion {i + 1}, because it uses 'const instead let': {suggestion}")
                     continue
@@ -2152,7 +2171,8 @@ class PRCodeSuggestions:
         # get PR diff
         deleted_files = []
         if get_settings().pr_code_suggestions.decouple_hunks:
-            packed_diffs = get_pr_multi_diffs(
+            packed_diffs = await asyncio.to_thread(
+                get_pr_multi_diffs,
                 self.git_provider, attempt_token_handler, model,
                 max_calls=get_settings().pr_code_suggestions.max_number_of_calls,
                 add_line_numbers=True, return_coverage=True,
@@ -2163,7 +2183,8 @@ class PRCodeSuggestions:
 
         else:
             # non-decoupled hunks
-            packed_diffs = get_pr_multi_diffs(
+            packed_diffs = await asyncio.to_thread(
+                get_pr_multi_diffs,
                 self.git_provider, attempt_token_handler, model,
                 max_calls=get_settings().pr_code_suggestions.max_number_of_calls,
                 add_line_numbers=False, return_coverage=True,
@@ -2178,7 +2199,8 @@ class PRCodeSuggestions:
             if not self.patches_diff_list:
                 # fallback to decoupled hunks
                 deleted_files.clear()
-                packed_diffs = get_pr_multi_diffs(
+                packed_diffs = await asyncio.to_thread(
+                    get_pr_multi_diffs,
                     self.git_provider, attempt_token_handler, model,
                     max_calls=get_settings().pr_code_suggestions.max_number_of_calls,
                     add_line_numbers=True, return_coverage=True,

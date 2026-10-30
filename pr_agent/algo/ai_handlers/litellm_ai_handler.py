@@ -265,6 +265,9 @@ def _coerce_string_list_config(value):
     return None
 
 
+MAX_CONFIG_NUM_RETRIES = 10
+
+
 def _configured_client_retries():
     """config.num_retries as a non-negative int (unset/invalid = DEFAULT_NUM_RETRIES).
 
@@ -286,6 +289,11 @@ def _configured_client_retries():
     if parsed < 0:
         get_logger().warning(f"Ignoring negative config.num_retries: {parsed}")
         return DEFAULT_NUM_RETRIES
+    if parsed > MAX_CONFIG_NUM_RETRIES:
+        get_logger().warning(
+            f"Clamping config.num_retries from {parsed} to {MAX_CONFIG_NUM_RETRIES}"
+        )
+        return MAX_CONFIG_NUM_RETRIES
     return parsed
 
 
@@ -2847,7 +2855,7 @@ class LiteLLMAIHandler(BaseAiHandler):
 
             encoder = TokenEncoder.get_token_encoder("anthropic/claude")
             system_tokens = len(encoder.encode(system or "", disallowed_special=()))
-            user_tokens = len(encoder.encode(user or "", disallowed_special=()))
+            user_tokens = len(encoder.encode(user or "", disallowed_special=())) if targets_user else 0
         except Exception:
             system_tokens = len(system or "") // 4
             user_tokens = len(user or "") // 4
