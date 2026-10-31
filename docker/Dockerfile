@@ -84,6 +84,8 @@ COPY .github/workflows/build-and-test.yaml .github/workflows/build-and-test.yaml
 COPY docker/Dockerfile docker/Dockerfile
 COPY docker/Dockerfile.lambda docker/Dockerfile.lambda
 COPY docker/mosaico docker/mosaico
+# Loaded by its unit test.
+COPY scripts/structural_reach_producer.py scripts/structural_reach_producer.py
 # Read by the docs guards: the URL checker, the pages that link into the docs site,
 # and the packaging inputs that must ship every /help page suffix. Kept last so a
 # README edit only rebuilds these final layers.

@@ -11,6 +11,7 @@ from pr_agent.algo.pr_processing import (
     FallbackEligibleError,
     get_pr_diff,
     retry_with_fallback_models,
+    run_diff_preparation,
 )
 from pr_agent.algo.run_details import record_command_failure
 from pr_agent.algo.token_budget import AttemptTokenBudget
@@ -91,17 +92,12 @@ class PRGenerateLabels:
                 if self.git_provider.is_supported("get_labels"):
                     current_labels = self.git_provider.get_pr_labels(update=True)
                     if current_labels is None:
-                        # The read failed and there is no earlier snapshot to preserve user
-                        # labels from. publish_labels replaces the whole set, so publishing
-                        # now would delete every label a human added to the PR.
-                        get_logger().error(
-                            "Skipping label publish: existing labels could not be read, "
-                            "and publishing would remove them")
-                    else:
-                        user_labels = get_user_labels(current_labels)
-                        pr_labels = pr_labels + user_labels
-                        if set(pr_labels) != set(current_labels):
-                            self.git_provider.publish_labels(pr_labels)
+                        raise RuntimeError("Existing PR labels could not be read; skipping label publication")
+                    user_labels = get_user_labels(current_labels)
+                    pr_labels = pr_labels + user_labels
+                    if set(pr_labels) != set(current_labels):
+                        if self.git_provider.publish_labels(pr_labels) is False:
+                            raise RuntimeError("Failed to publish PR labels")
                 elif pr_labels:
                     value = ', '.join(v for v in pr_labels)
                     pr_labels_text = f"## PR Labels:\n{value}\n"
@@ -154,7 +150,8 @@ class PRGenerateLabels:
             ai_handler=self.ai_handler,
             output_token_reserve=output_token_reserve,
         )
-        output = get_pr_diff(
+        output = await run_diff_preparation(
+            get_pr_diff,
             self.git_provider,
             budget.token_handler,
             model,

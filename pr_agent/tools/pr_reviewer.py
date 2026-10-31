@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
-from pr_agent.algo.artifacts import get_artifact_context
+from pr_agent.algo.artifacts import get_artifact_context, resolve_artifact_path
 from pr_agent.algo.comment_identity import (
     PRReviewHeader,
     PRReviewIdentity,
@@ -60,8 +60,8 @@ from pr_agent.algo.run_output import (
 )
 from pr_agent.algo.setting_utils import _as_bool_setting
 from pr_agent.algo.skills_loader import get_skills_context
+from pr_agent.algo.structural_reach import build_structural_reach
 from pr_agent.algo.token_budget import AttemptTokenBudget
-from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import (
     ModelType,
     _as_line,
@@ -167,6 +167,11 @@ _STATE_BLOCK_INVALID_MARKER = "invalid_marker"
 _STATE_BLOCK_READ_ERROR = "read_error"
 _STATE_BLOCK_REVIEW_DATA = "review_data"
 _STATE_BLOCK_SIZE = "state_size"
+
+
+def _is_structural_reach_key(key) -> bool:
+    """Whether a review key would render like the deterministic structural reach row, whatever its separators."""
+    return re.sub(r"[^a-z0-9]", "", str(key).lower()) == "structuralreach"
 
 
 class PRReviewer:
@@ -278,13 +283,6 @@ class PRReviewer:
             'duplicate_prompt_examples': get_settings().config.get('duplicate_prompt_examples', False),
             "date": datetime.datetime.now().strftime('%Y-%m-%d'),
         }
-
-        self.token_handler = TokenHandler(
-            self.git_provider.pr,
-            self.vars,
-            get_settings().pr_review_prompt.system,
-            get_settings().pr_review_prompt.user
-        )
 
     def parse_incremental(self, args: list[str]):
         is_incremental = False
@@ -1329,6 +1327,8 @@ class PRReviewer:
         if isinstance(data, dict) and isinstance(data.get("review"), dict):
             if not getattr(self, "vars", {}).get("require_failure_modes", False):
                 data["review"].pop("failure_modes", None)
+            for key in [k for k in data["review"] if _is_structural_reach_key(k)]:
+                data["review"].pop(key)
         if self.prediction_data is None:
             self._validate_review_schema(data)
         if isinstance(data, dict) and isinstance(data.get("review"), dict) and "failure_modes" in data["review"]:
@@ -1342,6 +1342,10 @@ class PRReviewer:
                 get_logger().warning("Review data is invalid; preserving persistent finding state")
             get_logger().exception("Failed to parse review data", artifact={"data": data})
             return ""
+
+        structural_reach = build_structural_reach(resolve_artifact_path)
+        if structural_reach:
+            data["review"] = {"structural_reach": structural_reach, **data["review"]}
 
         structured_publisher = getattr(self.git_provider, "publish_structured_review", None)
         if callable(structured_publisher) or review_json_output_path.get():
