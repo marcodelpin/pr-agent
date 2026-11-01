@@ -44,7 +44,7 @@ to-do list.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `log_level` | "DEBUG" |  |
+| `log_level` | "INFO" |  |
 **Configurations**
 
 | Key | Default | Description |
@@ -111,7 +111,7 @@ to-do list.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `ignore_pr_title` | ["^\\[Auto\\]", "^Auto"] | a list of regular expressions to match against the PR title to ignore the PR agent |
+| `ignore_pr_title` | ["^\\[Auto\\]"] | a list of regular expressions to match against the PR title to ignore the PR agent |
 | `ignore_pr_target_branches` | [] | a list of regular expressions of target branches to ignore from PR agent when an PR is created |
 | `ignore_pr_source_branches` | [] | a list of regular expressions of source branches to ignore from PR agent when an PR is created |
 | `ignore_pr_labels` | [] | labels to ignore from PR agent when an PR is created |
@@ -279,7 +279,7 @@ verify the status-changing actor or historical defaults. Dismissed findings shar
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `suggestions_score_threshold` | 0 | [0-10]\| recommend not to set this value above 8, since above it may clip highly relevant suggestions |
+| `suggestions_score_threshold` | 1 | [0-10]\| 0 is treated as 1; recommend not to set this value above 8, since above it may clip highly relevant suggestions |
 | `score_on_reflection_failure` | 7 | [0-10]\| score assigned when self-reflection fails or its feedback cannot be parsed; set below suggestions_score_threshold to drop unvetted suggestions |
 | `new_score_mechanism` | true |  |
 | `new_score_mechanism_th_high` | 9 |  |
