@@ -288,6 +288,8 @@ for example `pr-agent-github-com-owner-repo-pull-123-b065a0b1d1c7b721`. A header
 
 Various logging observability tools can be used out-of-the box when using the default LiteLLM AI Handler. Simply configure the LiteLLM callback settings in `configuration.toml` and set environment variables according to the LiteLLM [documentation](https://docs.litellm.ai/docs/).
 
+> The callback lists are process-wide LiteLLM settings, so only the deployment's own configuration and environment set them; a repository's `.pr_agent.toml` does not. In the GitHub Action, set them as `env` entries in the workflow, for example `LITELLM.SUCCESS_CALLBACK: '["langsmith"]'` and `LITELLM.FAILURE_CALLBACK: '["langsmith"]'`.
+
 For example, to use [LangSmith](https://www.langchain.com/langsmith) you can add the following to your `configuration.toml` file:
 
 ```
@@ -437,12 +439,14 @@ prometheus_multiproc_dir = "/tmp/pr-agent-prometheus" # shared, writable by ever
 4. Metric families are created from the first data point's label set. Later attributes that do not fit the family are dropped, and missing ones are back-filled with an empty string, so a scrape never breaks on drifting label cardinality.
 5. The exporter ships with PR-Agent (it depends on `prometheus-client`); no extra package is required. Scrape it like any exporter:
 
-```yaml
-scrape_configs:
-  - job_name: pr-agent
-    static_configs:
-      - targets: ["pr-agent:3000"]
-```
+   ```yaml
+   scrape_configs:
+     - job_name: pr-agent
+       static_configs:
+         - targets: ["pr-agent:3000"]
+   ```
+
+### Privacy and lifecycle
 
 Privacy controls (both off by default):
 
