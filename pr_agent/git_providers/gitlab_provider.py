@@ -1405,6 +1405,21 @@ class GitLabProvider(GitProvider):
             get_logger().exception(f"Could not get head SHA: {e}")
             return ""
 
+    def get_pr_identity(self) -> dict:
+        repo = getattr(self, "id_project", None)
+        repo = repo if isinstance(repo, str) else ("" if repo is None else str(repo))
+        if "/" not in repo:
+            project_path = getattr(self.mr, "path_with_namespace", None)
+            if isinstance(project_path, str) and project_path:
+                repo = project_path
+        return {
+            "url": getattr(self.mr, "web_url", None) or self.get_pr_url() or "",
+            "provider": "gitlab",
+            "repo": repo,
+            "number": self.id_mr if self.id_mr is not None else "",
+            "head_sha": self.get_pr_head_sha(),
+        }
+
     def get_comment_url(self, comment):
         return f"{self.mr.web_url}#note_{comment.id}"
 
@@ -1724,6 +1739,7 @@ class GitLabProvider(GitProvider):
         seen = set(bodies)
         if self.mr is None:
             return bodies
+        # Discussions include standalone notes as individual_note entries.
         for discussion in self.mr.discussions.list(get_all=True, per_page=100):
             attrs = getattr(discussion, "attributes", None) or {}
             for note in attrs.get("notes", []) or []:
@@ -1732,11 +1748,6 @@ class GitLabProvider(GitProvider):
                     if body and body not in seen:
                         bodies.append(body)
                         seen.add(body)
-        for note in self.mr.notes.list(get_all=True, per_page=100):
-            body = getattr(note, "body", "") or ""
-            if body and body not in seen:
-                bodies.append(body)
-                seen.add(body)
         try:
             for draft in self.mr.draft_notes.list(get_all=True, per_page=100):
                 body = getattr(draft, "note", "") or ""
