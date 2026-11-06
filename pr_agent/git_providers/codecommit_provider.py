@@ -18,7 +18,7 @@ from ..algo.comment_identity import (
 )
 from ..algo.utils import load_large_diff
 from ..log import get_logger
-from .git_provider import GitProvider, cache_languages
+from .git_provider import GitProvider, cache_languages, format_persistent_update_header
 
 
 class PullRequestCCMimic:
@@ -102,8 +102,6 @@ class CodeCommitProvider(GitProvider):
 
     def is_supported(self, capability: str) -> bool:
         if capability in [
-            "create_inline_comment",
-            "publish_inline_comments",
             "get_labels",
             "gfm_markdown",
             "markdown_backslash_escapes",
@@ -420,9 +418,6 @@ class CodeCommitProvider(GitProvider):
     def publish_inline_comments(self, comments: list[dict]):
         raise NotImplementedError("CodeCommit provider does not support publishing inline comments yet")
 
-    def get_title(self):
-        return self.pr.title
-
     def get_pr_id(self):
         """
         Returns the PR ID in the format: "repo_name/pr_number".
@@ -724,7 +719,7 @@ class CodeCommitProvider(GitProvider):
         if not update_header:
             return pr_comment
 
-        update_message = f"#### ({name.capitalize()} updated until commit {target['source_commit']})\n"
+        update_message = format_persistent_update_header(name, target["source_commit"])
         updated_anchor = f"{identity_marker}\n\n{update_message}"
         return pr_comment.replace(identity_marker, updated_anchor, 1)
 

@@ -68,7 +68,7 @@ See [Configuration options](../usage-guide/configuration_options.md#global-confi
 | `num_retries` | 4 | same-model retries of a request the provider rejects (429, 5xx, connection error) before fallback_models, waiting for its Retry-After (up to 30 s) or with exponential backoff; 0 falls back at once. Timeouts and empty responses use retry_same_model_on_timeout / retry_same_model_on_length instead |
 | `skip_keys` | [] |  |
 | `custom_reasoning_model` | false | when true, disables system messages and temperature controls for models that don't support chat-style inputs |
-| `response_language` | "en-US" | PR response locale (e.g., "en-US", "it-IT"); generated guidance applies only during each command. See additional_configurations.md. |
+| `response_language` | "en-US" | PR response locale (e.g., "en-US", "it-IT"), also used for fixed comment text; applies only during each command. See additional_configurations.md. |
 | `repo_context_files` | ["AGENTS.md"] | Prompt context files: paths, alternatives, globs, sibling entries; [] disables. See [docs](additional_configurations.md). |
 | `repo_context_from_default_branch` | true | Read repo context files from the repository default branch (trusts only default-branch content). Set to false to read from the PR target branch instead. |
 | `repo_context_max_lines` | 500 | Maximum total rendered lines for repo context, including wrapper tags |
@@ -690,9 +690,10 @@ See [Push outputs](../usage-guide/push_outputs.md#configuration).
 | Key | Default | Description |
 | --- | --- | --- |
 | `enable` | false |  |
-| `channels` | [] | any of: "stdout", "file", "webhook", "slack", "telegram". Nothing is emitted until a channel is listed here |
+| `channels` | [] | exact names as a list/tuple or comma-separated string: "stdout", "file", "webhook", "slack", "telegram", "teams"; empty emits nothing |
 | `file_path` | "pr-agent-outputs/reviews.jsonl" | used by the "file" channel |
 | `webhook_url` | "" | used by the "webhook" channel: generic JSON POST target. Must be an absolute https:// URL |
 | `slack_webhook_url` | "" | used by the "slack" channel: a Slack Incoming Webhook URL. Must be an absolute https:// URL |
 | `telegram_bot_token` | "" | used by the "telegram" channel; kept in the fixed api.telegram.org URL path |
 | `telegram_chat_id` | "" | used by the "telegram" channel as sendMessage's destination chat |
+| `teams_webhook_url` | "" | used by the "teams" channel: Teams Workflows webhook URL. Must be an absolute https:// URL |

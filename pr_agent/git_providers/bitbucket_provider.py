@@ -317,7 +317,8 @@ class BitbucketProvider(GitProvider):
         if repo_git_url:
             parsed_git_url = urlparse(repo_git_url)
             scheme_and_netloc = parsed_git_url.scheme + "://" + parsed_git_url.netloc
-            repo_path = parsed_git_url.path.split('.git')[0][1:] #/<workspace>/<repo>.git -> <workspace>/<repo>
+            #/<workspace>/<repo>.git -> <workspace>/<repo>
+            repo_path = parsed_git_url.path.rstrip('/').removesuffix('.git')[1:]
             if repo_path.count('/') != 1:
                 get_logger().error(f"repo_git_url is not a valid git repo url: {repo_git_url}")
                 return ("", "")
@@ -373,7 +374,7 @@ class BitbucketProvider(GitProvider):
         get_logger().error(f"Bitbucket failed to publish code suggestion, error: {error}")
 
     def is_supported(self, capability: str) -> bool:
-        if capability in ['publish_inline_comments', 'get_labels', 'gfm_markdown']:
+        if capability in ['get_labels', 'gfm_markdown']:
             return False
         if capability == "push_code":
             return not get_settings().config.restricted_mode and self._pr_head_in_base_repo()
@@ -756,9 +757,6 @@ class BitbucketProvider(GitProvider):
         # A partial failure must not report failure: the caller republishes the whole
         # list, which would post the already-accepted suggestions a second time.
         return published_count > 0 or publishable_count == 0
-
-    def get_title(self):
-        return self.pr.title
 
     @cache_languages
     def get_languages(self):

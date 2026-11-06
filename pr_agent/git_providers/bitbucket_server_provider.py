@@ -104,7 +104,7 @@ class BitbucketServerProvider(GitProvider):
                                    f"project_name={project_name}, default_branch_dict={default_branch_dict}")
                 return ("", "")
         elif '.git' in repo_git_url and 'scm/' in repo_git_url:
-            repo_path = repo_git_url.split('.git')[0].split('scm/')[-1]
+            repo_path = repo_git_url.rstrip('/').removesuffix('.git').split('scm/')[-1]
             if repo_path.count('/') == 1:  # Has to have the form <workspace>/<repo>
                 workspace_name, project_name = repo_path.split('/')
         if not workspace_name or not project_name:
@@ -547,9 +547,6 @@ class BitbucketServerProvider(GitProvider):
         # A partial failure must not report failure: the caller republishes the whole
         # list, which would post the already-accepted suggestions a second time.
         return published_count > 0 or publishable_count == 0
-
-    def get_title(self):
-        return self.pr.title
 
     @cache_languages
     def get_languages(self):
