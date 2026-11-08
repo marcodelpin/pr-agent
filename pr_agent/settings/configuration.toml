@@ -38,6 +38,7 @@ retry_same_model_on_length = false # when true, an empty response truncated by t
 num_retries = 4 # same-model retries of a request the provider rejects (429, 5xx, connection error) before fallback_models, waiting for its Retry-After (up to 30 s) or with exponential backoff; 0 falls back at once. Timeouts and empty responses use retry_same_model_on_timeout / retry_same_model_on_length instead
 skip_keys = []
 custom_reasoning_model = false # when true, disables system messages and temperature controls for models that don't support chat-style inputs
+system_instructions="" # Host-only instructions appended to every tool's system prompt; repository settings and comment arguments cannot set it.
 response_language="en-US" # PR response locale (e.g., "en-US", "it-IT"), also used for fixed comment text; applies only during each command. See additional_configurations.md.
 repo_context_files = ["AGENTS.md"] # Prompt context files: paths, alternatives, globs, sibling entries; [] disables. See [docs](additional_configurations.md).
 # The repo-context cache is keyed on the revision read: the PR target commit for target-branch
@@ -262,7 +263,8 @@ extra_instructions = ""
 [pr_code_suggestions] # /improve #
 # Deprecated alias still accepted until 1.0: pr_code_suggestions.commitable_code_suggestions
 committable_code_suggestions = false
-dual_publishing_score_threshold=-1 # -1 or 0 disables, [1-10] to set the threshold (>=) for publishing a code suggestion both in a table and as committable
+# Not settable from a per-directory .pr_agent.toml. -1 or 0 disables, [1-10] also publishes suggestions scoring >= it as committable, besides the table.
+dual_publishing_score_threshold=-1
 focus_only_on_problems=true
 #
 extra_instructions = ""
@@ -659,6 +661,7 @@ agent_identity = "" # Host-only GUID, unique name, descriptor, or list; empty re
 [push_outputs] # push tool outputs to external sinks without calling git-provider APIs (disabled by default)
 enable = false
 channels = [] # exact names as a list/tuple or comma-separated string: "stdout", "file", "webhook", "slack", "telegram", "teams"; empty emits nothing
+tools = ["review", "describe", "improve"] # output types to deliver; add "ask" to include Q&A, or select fewer tools; supports comma-separated strings
 file_path = "pr-agent-outputs/reviews.jsonl" # used by the "file" channel
 webhook_url = "" # used by the "webhook" channel: generic JSON POST target. Must be an absolute https:// URL
 slack_webhook_url = "" # used by the "slack" channel: a Slack Incoming Webhook URL. Must be an absolute https:// URL

@@ -105,6 +105,8 @@ REPO_HOST_ONLY_KEYS_BY_SECTION = {
     # worker occupancy across SDK retries. Command arguments enforce this same boundary.
     # enable_auto_approval lets a reviewed repository switch on an approval action taken with
     # the host's credentials, so only the operator may enable it.
+    # system_instructions is appended to every model system prompt. A repository or comment
+    # must not be able to remove or replace an operator's mandatory policy.
     "config": frozenset({
         "extra_config_url",
         "description_issue_regex",
@@ -116,6 +118,7 @@ REPO_HOST_ONLY_KEYS_BY_SECTION = {
         "repo_context_max_sibling_files",
         "repo_context_sibling_repos",
         "num_retries",
+        "system_instructions",
     }),
 }
 
@@ -170,6 +173,7 @@ CLI_HOST_ONLY_KEYS_BY_SECTION = {
         "repo_context_files",
         "repo_context_max_glob_matches",
         "repo_context_expand_imports",
+        "system_instructions",
     }),
     "github_action_config": frozenset({"fail_on_tool_errors"}),
     "ignore": frozenset({"regex"}),
@@ -223,6 +227,9 @@ PER_DIRECTORY_HOST_ONLY_KEYS_BY_SECTION = {
         # an unrecognized key survives the merge, so leaving the alias out of this set would
         # hand a nested file the very control the canonical name is denied.
         "commitable_code_suggestions",
+        # Dual publishing posts every suggestion at or above the threshold through the same
+        # inline path, so a nested file must not be able to turn it on either.
+        "dual_publishing_score_threshold",
         "max_number_of_calls", "parallel_calls", "max_discussion_context_chars",
         "demand_code_suggestions_self_review",
     }),

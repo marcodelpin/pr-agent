@@ -68,6 +68,7 @@ See [Configuration options](../usage-guide/configuration_options.md#global-confi
 | `num_retries` | 4 | same-model retries of a request the provider rejects (429, 5xx, connection error) before fallback_models, waiting for its Retry-After (up to 30 s) or with exponential backoff; 0 falls back at once. Timeouts and empty responses use retry_same_model_on_timeout / retry_same_model_on_length instead |
 | `skip_keys` | [] |  |
 | `custom_reasoning_model` | false | when true, disables system messages and temperature controls for models that don't support chat-style inputs |
+| `system_instructions` | "" | Host-only instructions appended to every tool's system prompt; repository settings and comment arguments cannot set it. |
 | `response_language` | "en-US" | PR response locale (e.g., "en-US", "it-IT"), also used for fixed comment text; applies only during each command. See additional_configurations.md. |
 | `repo_context_files` | ["AGENTS.md"] | Prompt context files: paths, alternatives, globs, sibling entries; [] disables. See [docs](additional_configurations.md). |
 | `repo_context_from_default_branch` | true | Read repo context files from the repository default branch (trusts only default-branch content). Set to false to read from the PR target branch instead. |
@@ -275,7 +276,7 @@ See [Improve](../tools/improve.mdx#configuration-options).
 | Key | Default | Description |
 | --- | --- | --- |
 | `committable_code_suggestions` | false | Deprecated alias still accepted until 1.0: pr_code_suggestions.commitable_code_suggestions |
-| `dual_publishing_score_threshold` | -1 | -1 or 0 disables, [1-10] to set the threshold (>=) for publishing a code suggestion both in a table and as committable |
+| `dual_publishing_score_threshold` | -1 | Not settable from a per-directory .pr_agent.toml. -1 or 0 disables, [1-10] also publishes suggestions scoring >= it as committable, besides the table. |
 | `focus_only_on_problems` | true |  |
 | `extra_instructions` | "" |  |
 | `suggestions_heading` | "PR Code Suggestions" | Visible base heading for summary-table /improve comments. Identity is tracked separately. |
@@ -691,6 +692,7 @@ See [Push outputs](../usage-guide/push_outputs.md#configuration).
 | --- | --- | --- |
 | `enable` | false |  |
 | `channels` | [] | exact names as a list/tuple or comma-separated string: "stdout", "file", "webhook", "slack", "telegram", "teams"; empty emits nothing |
+| `tools` | ["review", "describe", "improve"] | output types to deliver; add "ask" to include Q&A, or select fewer tools; supports comma-separated strings |
 | `file_path` | "pr-agent-outputs/reviews.jsonl" | used by the "file" channel |
 | `webhook_url` | "" | used by the "webhook" channel: generic JSON POST target. Must be an absolute https:// URL |
 | `slack_webhook_url` | "" | used by the "slack" channel: a Slack Incoming Webhook URL. Must be an absolute https:// URL |
