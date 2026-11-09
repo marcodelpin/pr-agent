@@ -32,6 +32,7 @@ from pr_agent.servers.request_body_limit import create_server_app
 from pr_agent.servers.utils import (
     DefaultDictWithTimeout,
     auto_feedback_disabled,
+    get_include_pr_labels,
     get_pr_commands,
     is_ask_command_comment,
     push_trigger_slot,
@@ -309,7 +310,11 @@ async def handle_push_trigger_for_new_commits(body: dict[str, Any],
     apply_repo_settings(api_url)
     if not _as_bool_setting(get_settings().github_app.handle_push_trigger):
         return {}
-    if (_as_bool_setting(get_settings().github_app.push_trigger_ignore_bot_commits, default=True)
+    if (_as_bool_setting(
+            get_settings().github_app.push_trigger_ignore_bot_commits,
+            default=True,
+            setting_name="github_app.push_trigger_ignore_bot_commits",
+        )
             and body.get("sender", {}).get("type") == "Bot"):
         get_logger().info(f"Skipping {event}: bot commit detected")
         return {}
@@ -319,7 +324,11 @@ async def handle_push_trigger_for_new_commits(body: dict[str, Any],
     merge_commit_sha = pull_request.get("merge_commit_sha")
     if before_sha == after_sha:
         return {}
-    if (_as_bool_setting(get_settings().github_app.push_trigger_ignore_merge_commits, default=True)
+    if (_as_bool_setting(
+            get_settings().github_app.push_trigger_ignore_merge_commits,
+            default=True,
+            setting_name="github_app.push_trigger_ignore_merge_commits",
+        )
             and after_sha == merge_commit_sha):
         return {}
 
@@ -396,7 +405,12 @@ async def _dispatch_request(body: dict[str, Any], event: str, action: str):
         get_logger().debug("Request ignored: bot user detected")
         return {}
     if action != 'created' and 'check_run' not in body:
-        if not should_process_pr_logic(body):
+        # Defer the opt-in label gate until repository settings have been applied.
+        prefilter_allowed = (
+            shared_should_process_pr_logic(body, provider="github", check_include_labels=False)
+            if get_include_pr_labels() else should_process_pr_logic(body)
+        )
+        if not prefilter_allowed:
             get_logger().debug("Request ignored: PR logic filtering")
             return {}
 
@@ -445,7 +459,11 @@ async def handle_request(body: dict[str, Any], event: str, delivery_id: str | No
         get_logger().debug("No action found in request body, exiting handle_request")
         return {}
     settings = get_settings()
-    if not delivery_id or not _as_bool_setting(settings.get("GITHUB_APP.WEBHOOK_DELIVERY_DEDUPLICATION", False)):
+    if not delivery_id or not _as_bool_setting(
+        settings.get("GITHUB_APP.WEBHOOK_DELIVERY_DEDUPLICATION", False),
+        default=True,
+        setting_name="github_app.webhook_delivery_deduplication",
+    ):
         await _dispatch_request(body, event, action)
         return {}
 
