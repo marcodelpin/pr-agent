@@ -25,6 +25,7 @@ from pr_agent.algo.comment_identity import (
 from pr_agent.algo.findings import Finding
 from pr_agent.algo.git_patch_processing import decouple_and_convert_to_hunks_with_lines_numbers, split_diff_lines
 from pr_agent.algo.i18n import t
+from pr_agent.algo.markdown_span import _markdown_code_span
 from pr_agent.algo.pr_processing import (
     DELETED_FILES_,
     OUTPUT_BUFFER_TOKENS_HARD_THRESHOLD,
@@ -202,15 +203,6 @@ def get_committable_code_suggestions() -> bool:
             "1.0; rename it to pr_code_suggestions.committable_code_suggestions"
         )
     return deprecated
-
-
-def _markdown_code_span(text: str) -> str:
-    """Keep repository-controlled filenames inside one Markdown code span."""
-    text = text.replace("\r", "\\r").replace("\n", "\\n")
-    delimiter = "`" * (max((len(run.group()) for run in re.finditer(r"`+", text)), default=0) + 1)
-    if text.startswith(("`", " ")) or text.endswith(("`", " ")):
-        text = f" {text} "
-    return f"{delimiter}{text}{delimiter}"
 
 
 def render_suggestions_markdown(data: dict) -> str:
@@ -846,7 +838,8 @@ class PRCodeSuggestions:
         coverage_footer = self._get_suggestions_coverage_footer(suggestions_present=False)
         no_suggestions_message = (t("improve.no_suggestions_in_chunks")
                                   if coverage_footer else t("improve.no_suggestions_for_pr"))
-        pr_body = f"{format_pr_code_suggestions_header()}\n\n{no_suggestions_message}{coverage_footer}"
+        pr_body = (f"{format_pr_code_suggestions_header()}\n\n{t('improve.merge_notice')}\n\n"
+                   f"{no_suggestions_message}{coverage_footer}")
         if get_settings().config.publish_output:
             markdown = f"## PR Code Suggestions\n\n{no_suggestions_message}{coverage_footer}"
             await push_outputs_async(
@@ -1543,6 +1536,7 @@ class PRCodeSuggestions:
 
         # remove or edit invalid suggestions
         suggestion_list = []
+        invalid_suggestion_count = 0
         accepted_suggestion_keys = []
         for i, suggestion in enumerate(data['code_suggestions']):
             try:
@@ -1555,6 +1549,7 @@ class PRCodeSuggestions:
                             f"Skipping suggestion {i + 1}, because it does not contain '{key}':\n'{suggestion}")
                         break
                 if not is_valid_keys:
+                    invalid_suggestion_count += 1
                     continue
 
                 if get_settings().get("pr_code_suggestions.focus_only_on_problems", False):
@@ -1587,12 +1582,16 @@ class PRCodeSuggestions:
                     )
                     suggestion_list.append(suggestion)
                 else:
+                    invalid_suggestion_count += 1
                     get_logger().info(
                         f"Skipping suggestion {i + 1}, because it does not contain "
                         f"'existing_code' or 'improved_code': {suggestion}"
                     )
             except Exception as e:
+                invalid_suggestion_count += 1
                 get_logger().error(f"Error processing suggestion {i + 1}: {suggestion}, error: {e}")
+        if data['code_suggestions'] and invalid_suggestion_count == len(data['code_suggestions']):
+            raise FallbackEligibleError("All code suggestions failed processing")
         data['code_suggestions'] = suggestion_list
 
         return data
@@ -1672,7 +1671,9 @@ class PRCodeSuggestions:
                                      if include_coverage_footer else "")
             no_suggestions_message = (t("improve.no_suggestions_in_chunks_inline")
                                       if empty_coverage_footer else t("improve.no_suggestions"))
-            pr_body = no_suggestions_message + empty_coverage_footer
+            # This comment has no heading, and a body starting with "/" reads as a command, so
+            # emphasize the notice line instead of leading with a bare slash.
+            pr_body = f"**{t('improve.merge_notice')}**\n\n{no_suggestions_message}{empty_coverage_footer}"
             if self.progress_response:
                 if not _edit_comment_safely(self.git_provider, self.progress_response, pr_body):
                     self.git_provider.publish_comment(pr_body)
@@ -2355,7 +2356,7 @@ class PRCodeSuggestions:
 
     def generate_summarized_suggestions(self, data: dict) -> str:
         try:
-            pr_body = f"{format_pr_code_suggestions_header()}\n\n"
+            pr_body = f"{format_pr_code_suggestions_header()}\n\n{t('improve.merge_notice')}\n\n"
 
             if len(data.get('code_suggestions', [])) == 0:
                 pr_body += t("improve.no_suggestions")
@@ -2394,7 +2395,7 @@ class PRCodeSuggestions:
                 suggestions_labels[label].append(suggestion)
 
             if not suggestions_labels:
-                pr_body = f"{format_pr_code_suggestions_header()}\n\n"
+                pr_body = f"{format_pr_code_suggestions_header()}\n\n{t('improve.merge_notice')}\n\n"
                 pr_body += t("improve.no_suggestions")
                 return pr_body
 

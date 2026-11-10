@@ -17,6 +17,11 @@ Note that the main purpose of the `review` tool is to provide the **PR reviewer*
 
 (Read more about the different personas in the PR process and how PR-Agent aims to assist them in our [blog](https://www.qodo.ai/blog/understanding-the-challenges-and-pain-points-of-the-pull-request-cycle/))
 
+:::note
+`/improve` will be merged into `/review` in the next release. `/improve` will keep working and run
+`/review`, with a warning.
+:::
+
 ## Example usage
 
 ### Manual triggering
@@ -210,6 +215,15 @@ for the authoritative default values.
     <td>Off by default. If enabled, adds up to three concrete failure scenarios, each with what could break,
     where, its trigger, how it could be detected, and whether a test or check in this PR covers it.
     These scenarios guide human review; they do not gate merging or prove that the PR is safe.</td>
+  </tr>
+  <tr>
+    <td><b>require_artifact_findings</b></td>
+    <td>Off by default, and only active when a <a href="../../installation/github/#ci-artifact-context">CI artifact</a> reaches /review.
+    If enabled, adds a "CI artifact findings" section with up to five neutral facts from the artifact: destroyed or replaced
+    resources, failed jobs (including allowed-to-fail ones), failed tests, vulnerabilities and notable warnings. Each fact
+    carries a short quote from the artifact; a quote that cannot be found in the artifact is marked, and credentials in
+    facts and quotes are redacted. The section reports what the artifact shows and leaves the decision to the reviewer.
+    Host configuration only: a repository settings file or comment cannot set it.</td>
   </tr>
   <tr>
     <td><b>require_priority_files</b></td>
@@ -562,6 +576,8 @@ When no findings are detected, the row is omitted completely so clean reviews st
 
 **Custom patterns.** Additional regular expressions can be configured via `extra_risky_shapes`. Because regex execution
 has security implications, `extra_risky_shapes` must be configured through host configuration (such as environment
-variables or host settings) and cannot be overridden by repository `.pr_agent.toml` files.
+variables or host settings) and cannot be overridden by repository `.pr_agent.toml` files. Each search with a custom
+pattern has a 50 ms limit, and each custom pattern has 1 s in total per review. If a pattern exceeds either one,
+PR-Agent logs a warning and skips that pattern for the rest of the review.
 
 :::

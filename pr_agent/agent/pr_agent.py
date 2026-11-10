@@ -19,6 +19,7 @@ from pr_agent.algo.comment_identity import (
     comment_matches_identity,
 )
 from pr_agent.algo.run_details import command_failed, get_run_details, init_run_details
+from pr_agent.algo.setting_utils import _as_bool_setting
 from pr_agent.algo.utils import _fix_key_value, update_settings_from_args
 from pr_agent.config_loader import get_settings, global_settings
 from pr_agent.git_providers import get_git_provider_with_context
@@ -200,13 +201,15 @@ def parse_command(command: str) -> list[str]:
     for argument, value_was_quoted in token_args:
         if value_was_quoted and argument.startswith("--") and "=" in argument:
             key, value = argument.split("=", 1)
-            _, parsed = _fix_key_value(key, value)
             # A quoted list such as --ignore.glob="['*.py']" is the user's explicit list value,
             # so JSON-encoding it would collapse it into a string and silently disable list
-            # settings. Other quoted values keep being encoded so update_settings_from_args
-            # cannot coerce "true" to a boolean or a colon-prefixed value to a mapping.
-            if not isinstance(parsed, list):
-                argument = f"{key}={json.dumps(value, ensure_ascii=False)}"
+            # settings. Other quoted values (except opaque FILE_NAME paths) are
+            # encoded so update_settings_from_args cannot coerce "true" to a
+            # boolean or a colon-prefixed value to a mapping.
+            if key.lstrip("-").upper() != "FILE_NAME":
+                _, parsed = _fix_key_value(key, value)
+                if not isinstance(parsed, list):
+                    argument = f"{key}={json.dumps(value, ensure_ascii=False)}"
         args.append(argument)
     return [action] + args
 
@@ -222,6 +225,8 @@ def _reencode_quoted_setting_args(command: str, args: list[str]) -> list[str]:
     Plain scalars such as ``--pr_reviewer.num_max_findings=3`` keep their normal
     type conversion. Quoted lists keep their list type.
     Match quote flags by argument position so repeated values retain their own types.
+    Treat surrounding single quotes as delimiters only for raw FILE_NAME arguments,
+    where quoted provider filenames do not pass through this parser.
     """
     try:
         tokens = _split_command(command, single_quotes=False)[1:]
@@ -230,11 +235,15 @@ def _reencode_quoted_setting_args(command: str, args: list[str]) -> list[str]:
     encoded = []
     for index, argument in enumerate(args):
         value_was_quoted = index < len(tokens) and tokens[index][0] == argument and tokens[index][1]
-        if value_was_quoted and argument.startswith("--") and "=" in argument:
+        if argument.startswith("--") and "=" in argument:
             key, value = argument.split("=", 1)
-            _, parsed = _fix_key_value(key, value)
-            if not isinstance(parsed, (str, list)):
-                argument = f"{key}={json.dumps(value, ensure_ascii=False)}"
+            if key.lstrip("-").upper() == "FILE_NAME":
+                if not value_was_quoted and len(value) >= 2 and value[0] == value[-1] == "'":
+                    argument = f"{key}={value[1:-1]}"
+            elif value_was_quoted:
+                _, parsed = _fix_key_value(key, value)
+                if not isinstance(parsed, (str, list)):
+                    argument = f"{key}={json.dumps(value, ensure_ascii=False)}"
         encoded.append(argument)
     return encoded
 
@@ -312,6 +321,13 @@ def _record_token_metrics(action: str, git_provider: str) -> None:
             tokens_counter.add(count, {**labels, "gen_ai.token.type": token_type})
     if details.num_ai_calls:
         get_ai_calls_counter().add(details.num_ai_calls, labels)
+
+
+def _normalize_publish_output_setting() -> None:
+    """Honor false-like strings without changing explicitly empty or invalid setting defaults."""
+    settings = get_settings()
+    value = settings.config.publish_output
+    settings.set("CONFIG.PUBLISH_OUTPUT", _as_bool_setting(value, default=bool(value)))
 
 
 @contextmanager
@@ -490,6 +506,7 @@ class PRAgent:
             if settings.config.get("response_language", "en-us") != previous_response_language:
                 settings.set("CONFIG.RESPONSE_LANGUAGE", previous_response_language)
             raise
+        _normalize_publish_output_setting()
         language_overridden = settings.config.get("response_language", "en-us") != previous_response_language
 
         try:
@@ -532,24 +549,15 @@ class PRAgent:
         try:
             with response_language_instructions(), get_logger().contextualize(command=action, pr_url=pr_url):
                 get_logger().info("PR-Agent request handler started", analytics=True)
-                if action == "answer":
-                    if notify:
-                        notify()
-                    tool = await self._create_tool(PRReviewer, pr_url, is_answer=True, args=args)
-                    await tool.run()
-                elif action == "auto_review":
-                    tool = await self._create_tool(PRReviewer, pr_url, is_auto=True, args=args)
-                    await tool.run()
-                else:
-                    if notify:
-                        notify()
+                if notify:
+                    notify()
 
-                    tool = await self._create_tool(command2class[action], pr_url, args=args)
-                    result = await tool.run()
-                    if action == "add_docs" and result is False:
-                        span.set_status(StatusCode.ERROR)
-                        span.set_attribute("error.type", "documentation_publication_failed")
-                        return False
+                tool = await self._create_tool(command2class[action], pr_url, args=args)
+                result = await tool.run()
+                if action == "add_docs" and result is False:
+                    span.set_status(StatusCode.ERROR)
+                    span.set_attribute("error.type", "documentation_publication_failed")
+                    return False
 
                 if command_failed():
                     span.set_status(StatusCode.ERROR)

@@ -72,6 +72,14 @@ A `PR Code Verified` assessment indicates the PR code meets ticket requirements,
     require_ticket_analysis_review=false
     ```
 
+### Ask tool
+
+Set `pr_questions.use_ticket_context=true` to include linked ticket content in top-level `/ask` questions.
+This is disabled by default and is independent of `pr_reviewer.require_ticket_analysis_review`.
+It reuses the ticket integrations below and fits complete ticket records into the space left after the question,
+conversation history and selected diff. See [Linked ticket context](../tools/ask.md#linked-ticket-context)
+for usage and limits.
+
 ## GitHub/GitLab Issues Integration
 
 PR-Agent will automatically recognize GitHub/GitLab issues mentioned in the PR/MR title or description and fetch the issue content.
@@ -88,8 +96,8 @@ GitHub processes references from the description first, then the branch name, th
 description references before title references. Repeated identical references do not add lookups, and title references use
 the existing ticket lookup and result limits without displacing earlier sources.
 
-The optional `config.description_issue_regex` setting applies only to the GitHub PR description. GitHub titles use
-the built-in reference formats above, including local `#<ISSUE_NUMBER>` references of up to six digits.
+The optional `config.description_issue_regex` setting applies only to the GitHub PR description. Built-in matching on
+GitHub and GitLab recognizes local `#<ISSUE_NUMBER>` references of up to six digits.
 
 Branch names can also be used to link issues, for example:
 - `123-fix-bug` (where `123` is the issue number)

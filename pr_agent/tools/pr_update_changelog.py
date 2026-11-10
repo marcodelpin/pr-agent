@@ -6,6 +6,7 @@ from functools import partial
 
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
+from pr_agent.algo.code_fence import strip_wrapping_code_fence
 from pr_agent.algo.pr_processing import (
     OUTPUT_BUFFER_TOKENS_HARD_THRESHOLD,
     OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD,
@@ -16,6 +17,7 @@ from pr_agent.algo.pr_processing import (
 )
 from pr_agent.algo.run_details import init_run_details
 from pr_agent.algo.run_output import append_run_details, show_relevant_configurations
+from pr_agent.algo.setting_utils import _as_bool_setting
 from pr_agent.algo.token_budget import AttemptTokenBudget
 from pr_agent.algo.utils import ModelType
 from pr_agent.config_loader import get_settings
@@ -24,30 +26,6 @@ from pr_agent.git_providers.git_provider import FileContentSnapshot, get_main_pr
 from pr_agent.log import get_logger
 
 CHANGELOG_LINES = 50
-# A whole answer wrapped in one fenced block, e.g. "```markdown\n...\n```". The opening fence
-# is optional: the prompt ends with a dangling open "```markdown", which primes the model to
-# answer with a closing fence and no opening one.
-_WRAPPING_CODE_FENCE_RE = re.compile(r"\A(?:\s*(?P<open>```[^\n]*\n))?(?P<body>.*?)\n?```\s*\Z", re.DOTALL)
-_FENCE_LINE_RE = re.compile(r"(?m)^[^\S\n]*```")
-
-
-def strip_wrapping_code_fence(text: str) -> str:
-    """Remove a fence that wraps the whole answer, leaving the content untouched.
-
-    `str.strip("`")` would remove characters rather than the fence, so an entry ending in an
-    inline code span (`` - Handle `None` in `parse()` ``) loses its closing backtick and the
-    corrupted line is committed to CHANGELOG.md.
-
-    The function is idempotent, because the answer is stripped once when the model replies and
-    again before the changelog is built. Whether a trailing fence is a wrapper or the closer of a
-    code block the entry ends with comes down to whether the rest of the text is balanced: a
-    leftover fence either unterminates the block, or leaves a wrapper behind that then swallows
-    the rest of CHANGELOG.md when the file is committed.
-    """
-    match = _WRAPPING_CODE_FENCE_RE.match(text)
-    if match and (match.group("open") or len(_FENCE_LINE_RE.findall(match.group("body"))) % 2 == 0):
-        return match.group("body")
-    return text
 
 
 class PRUpdateChangelog:
@@ -74,7 +52,8 @@ class PRUpdateChangelog:
         # restricted_mode disables the "push_code" capability — degrade gracefully: still
         # generate the changelog and publish it as a comment (which only needs
         # pull-requests: write) instead of skipping the tool and dropping the output entirely.
-        self.push_changelog_changes = get_settings().pr_update_changelog.push_changelog_changes
+        push_changelog_changes = get_settings().pr_update_changelog.push_changelog_changes
+        self.push_changelog_changes = _as_bool_setting(push_changelog_changes, default=bool(push_changelog_changes))
         self.push_skipped_reason = None
         if self.push_changelog_changes:
             if not hasattr(self.git_provider, "create_or_update_pr_file"):
@@ -337,7 +316,8 @@ class PRUpdateChangelog:
             # whenever this capability is missing; kept local so the guard holds even
             # if a future caller reaches this method some other way.
             return
-        if get_settings().pr_update_changelog.get("skip_ci_on_push", True):
+        skip_ci_on_push = get_settings().pr_update_changelog.get("skip_ci_on_push", True)
+        if _as_bool_setting(skip_ci_on_push, default=bool(skip_ci_on_push)):
             commit_message = f"[skip ci] Update {self.changelog_path}"
         else:
             commit_message = f"Update {self.changelog_path}"

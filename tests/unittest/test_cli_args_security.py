@@ -50,6 +50,9 @@ FORBIDDEN_ARGS = [
     # misc
     "--config.shared_secret=xxx",
     "--config.app_name=evil",
+    "--config.bot_display_name=GitHub Security",
+    "--config__bot_display_name=GitHub Security",
+    '--config={"bot_display_name": "GitHub Security"}',
     "--config.analytics_folder=/tmp",
     # double-underscore variants of the above
     "--github__webhook_secret=secret",
@@ -193,6 +196,7 @@ ALLOWED_ARGS_SINGLE = [
 
 
 HOST_ONLY_ARGS = [
+    "--pr_questions.use_ticket_context=true",
     "--config.enable_custom_labels=true",
     "--config__enable_custom_labels=true",
     '--config={enable_custom_labels: true}',
