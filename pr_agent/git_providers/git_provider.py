@@ -695,6 +695,10 @@ class GitProvider(ABC):
         """
         return self.get_files()
 
+    def get_verdict_diff_files(self) -> list | None:
+        """Return full, unfiltered diff details when a provider can guarantee completeness."""
+        return None
+
     @abstractmethod
     def get_diff_files(self) -> list[FilePatchInfo]:
         pass
@@ -1444,7 +1448,10 @@ class GitProvider(ABC):
             "head_sha": self.get_pr_head_sha() or "",
         }
 
-    def auto_approve(self) -> bool:
+    def auto_approve(self, body: str = "") -> bool:
+        return False
+
+    def revoke_auto_approval(self, reason: str) -> bool:
         return False
 
     def get_head_ci_status(self, sha: str | None = None) -> str | None:

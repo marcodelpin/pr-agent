@@ -8,13 +8,54 @@ JSON and overrides GITHUB.DEPLOYMENT_TYPE to "app".
 
 from typing import Any
 
-from pr_agent.algo.setting_utils import normalize_setting_list
-from pr_agent.config_loader import get_settings
+from pr_agent.algo.setting_utils import _as_bool_setting, normalize_setting_list
+from pr_agent.config_loader import get_bot_display_name, get_settings
+from pr_agent.git_providers import get_git_provider_with_context
+from pr_agent.git_providers.utils import apply_host_settings
+from pr_agent.log import get_logger
 from pr_agent.servers.utils import is_ask_command_comment
 
 
 def _normalise_setting_list(value):
     return normalize_setting_list(value)
+
+
+def revoke_auto_approval_on_push(payload: dict) -> None:
+    """Dismiss PR-Agent's approval when a pull_request event changes the code it approved.
+
+    That is a push, or a retarget onto another base branch. Call this before any filter that
+    may skip the event: an approval must not outlive what it was given for just because the
+    push came from a bot or the PR is ignored.
+    """
+    action = payload.get("action")
+    if action == "synchronize":
+        why = "new commits were pushed"
+    elif action == "edited" and "base" in (payload.get("changes") or {}):
+        why = "the base branch changed"
+    elif action == "reopened":
+        why = "the pull request was reopened"
+    else:
+        return
+    pr_url = (payload.get("pull_request") or {}).get("url")
+    # The gates are host-only, so read them after the trusted host layer and before any repository override.
+    try:
+        apply_host_settings()
+    except Exception as e:
+        get_logger().warning(f"Could not apply host settings before approval revocation: {type(e).__name__}")
+    config = get_settings().config
+    if not pr_url or not _as_bool_setting(
+            config.get("enable_auto_approval", False), setting_name="config.enable_auto_approval"):
+        return
+    # A dry run writes nothing, dismissals included.
+    if not _as_bool_setting(config.get("publish_output", True), default=True):
+        return
+    try:
+        if not get_git_provider_with_context(pr_url).revoke_auto_approval(
+            f"{get_bot_display_name()} withdrew its approval: {why}."
+        ):
+            get_logger().error(f"Could not confirm that PR-Agent's approvals were dismissed after: {why}")
+    except Exception as e:
+        get_logger().exception(f"Failed to dismiss PR-Agent approvals after a push, error: {e}")
 
 
 def matches_review_state(review_state: Any, configured_states: Any) -> bool:
@@ -29,6 +70,24 @@ def matches_review_state(review_state: Any, configured_states: Any) -> bool:
         isinstance(state, str) and state.strip().lower() == normalized_state
         for state in configured_states
     )
+
+
+def pushed_base_branch_merge(git_provider: Any, before_sha: Any, after_sha: Any) -> bool:
+    """Whether a synchronize event's push only merged the base branch into the PR, as "Update branch" does.
+
+    The pushed head (`after`) must be a merge commit whose first parent is the previous head (`before`) and
+    whose second parent is on the base branch, so the push brought no other commit. The event does not say
+    this: its `pull_request.merge_commit_sha` is GitHub's test merge of the head into the base, never the head
+    itself. Without both commits, or when the provider cannot tell, the push is handled as an ordinary one.
+    """
+    is_base_branch_merge = getattr(git_provider, "is_base_branch_merge", None)
+    if not callable(is_base_branch_merge) or not all(isinstance(sha, str) and sha for sha in (before_sha, after_sha)):
+        return False
+    try:
+        return bool(is_base_branch_merge(after_sha, before_sha))
+    except Exception as e:
+        get_logger().warning(f"Could not tell whether {after_sha} only merges the base branch; handling the push: {e}")
+        return False
 
 
 def _reformat_quote_ask_command(comment_body: str) -> str | None:

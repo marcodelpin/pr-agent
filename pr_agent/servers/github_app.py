@@ -26,6 +26,8 @@ from pr_agent.servers import lambda_handoff
 from pr_agent.servers.github_common import (
     _normalise_setting_list,
     _reformat_quote_ask_command,
+    pushed_base_branch_merge,
+    revoke_auto_approval_on_push,
 )
 from pr_agent.servers.github_common import handle_line_comments as handle_line_comments
 from pr_agent.servers.github_common import matches_review_state as matches_review_state
@@ -33,6 +35,7 @@ from pr_agent.servers.request_body_limit import create_server_app
 from pr_agent.servers.utils import (
     DefaultDictWithTimeout,
     auto_feedback_disabled,
+    dedupe_review_commands,
     get_include_pr_labels,
     get_pr_commands,
     is_ask_command_comment,
@@ -315,7 +318,7 @@ async def handle_push_trigger_for_new_commits(body: dict[str, Any],
 
     # we need to apply the repo settings to get the correct settings for the PR.
     # This is quite expensive - a call to the git provider is made for each PR event.
-    apply_repo_settings(api_url)
+    git_provider = apply_repo_settings(api_url)
     if not _as_bool_setting(get_settings().github_app.handle_push_trigger):
         return {}
     if (_as_bool_setting(
@@ -329,7 +332,6 @@ async def handle_push_trigger_for_new_commits(body: dict[str, Any],
 
     before_sha = body.get("before")
     after_sha = body.get("after")
-    merge_commit_sha = pull_request.get("merge_commit_sha")
     if before_sha == after_sha:
         return {}
     if (_as_bool_setting(
@@ -337,7 +339,8 @@ async def handle_push_trigger_for_new_commits(body: dict[str, Any],
             default=True,
             setting_name="github_app.push_trigger_ignore_merge_commits",
         )
-            and after_sha == merge_commit_sha):
+            and pushed_base_branch_merge(git_provider, before_sha, after_sha)):
+        get_logger().info(f"Skipping {event}: the push only merged the base branch")
         return {}
 
     async with push_trigger_slot(
@@ -407,6 +410,8 @@ async def _dispatch_request(body: dict[str, Any], event: str, action: str):
     """Return False when a command fails, preserving ignored events as completed work."""
     agent = PRAgent()
     log_context, sender, sender_id, sender_type = get_log_context(body, event, action, build_number)
+    if event == 'pull_request':
+        revoke_auto_approval_on_push(body)
 
     # logic to ignore PRs opened by bot, PRs with specific titles, labels, source branches, or target branches
     if is_bot_user(sender, sender_type) and 'check_run' not in body:
@@ -525,7 +530,7 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     commands = (
         get_pr_commands("github_app")
         if commands_conf == "pr_commands"
-        else normalize_setting_list(get_settings().get(f"github_app.{commands_conf}"))
+        else dedupe_review_commands(normalize_setting_list(get_settings().get(f"github_app.{commands_conf}")))
     )
     if not commands:
         get_logger().info(f"No {commands_conf} configured, skipping auto commands")

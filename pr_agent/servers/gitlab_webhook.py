@@ -31,6 +31,7 @@ from pr_agent.servers import lambda_handoff
 from pr_agent.servers.request_body_limit import create_server_app
 from pr_agent.servers.utils import (
     auto_feedback_disabled,
+    dedupe_review_commands,
     get_include_pr_labels,
     get_pr_commands,
     is_ask_command_comment,
@@ -105,7 +106,7 @@ async def _perform_commands_gitlab(commands_conf: str, agent: PRAgent, api_url: 
     commands = (
         get_pr_commands("gitlab")
         if commands_conf == "pr_commands"
-        else normalize_setting_list(get_settings().get(f"gitlab.{commands_conf}", {}))
+        else dedupe_review_commands(normalize_setting_list(get_settings().get(f"gitlab.{commands_conf}", {})))
     )
     get_settings().set("config.is_auto_command", True)
     for command in commands:
@@ -268,12 +269,16 @@ async def is_bot_assigned_as_reviewer(data) -> bool:
         if "reviewers" not in changes:
             return False
         reviewers_change = changes["reviewers"]
-        if not isinstance(reviewers_change, dict):
+        if isinstance(reviewers_change, dict):
+            previous = reviewers_change.get("previous")
+            current = reviewers_change.get("current")
+        elif (isinstance(reviewers_change, list) and len(reviewers_change) == 2
+              and all(isinstance(reviewers, list) for reviewers in reviewers_change)):
+            previous, current = reviewers_change
+        else:
             return False
-        previous = reviewers_change.get("previous")
         if not isinstance(previous, list):
             previous = []
-        current = reviewers_change.get("current")
         if not isinstance(current, list):
             current = []
         bot_user_id = await _get_bot_user_id()
@@ -281,7 +286,12 @@ async def is_bot_assigned_as_reviewer(data) -> bool:
             return False
         previous_ids = {r.get("id") for r in previous if isinstance(r, dict)}
         current_ids = {r.get("id") for r in current if isinstance(r, dict)}
-        return bot_user_id in current_ids and bot_user_id not in previous_ids
+        if bot_user_id in current_ids and bot_user_id not in previous_ids:
+            return True
+        return (any(r.get("id") == bot_user_id and r.get("re_requested") is False
+                    for r in previous if isinstance(r, dict))
+                and any(r.get("id") == bot_user_id and r.get("re_requested") is True
+                        for r in current if isinstance(r, dict)))
     except Exception as e:
         get_logger().error(f"Failed 'is_bot_assigned_as_reviewer' logic: {e}")
     return False

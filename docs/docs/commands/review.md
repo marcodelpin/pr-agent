@@ -13,13 +13,12 @@ The command can be triggered automatically every time a new PR is [opened](../us
 /review
 ```
 
-Note that the main purpose of the `review` command is to provide the **PR reviewer** with useful feedback and insights. The PR author, in contrast, may prefer to save time and focus on the output of the [improve](./improve.mdx) command, which provides actionable code suggestions.
+Note that the main purpose of the `review` command is to provide the **PR reviewer** with useful feedback and insights. Findings can also carry a fix, which GitHub and the other supported providers offer as a [committable suggestion](#fixes-and-committable-suggestions).
 
 (Read more about the different personas in the PR process and how PR-Agent aims to assist them in our [blog](https://www.qodo.ai/blog/understanding-the-challenges-and-pain-points-of-the-pull-request-cycle/))
 
 :::note
-`/improve` will be merged into `/review` in the next release. `/improve` will keep working and run
-`/review`, with a warning.
+`/improve` runs `/review` as of 0.51. See [Improve](./improve.mdx).
 :::
 
 ## Example usage
@@ -163,11 +162,11 @@ for the authoritative default values.
   </tr>
   <tr>
     <td><b>num_max_findings</b></td>
-    <td>Maximum number of returned findings.</td>
+    <td>Maximum number of returned findings. Default is 6.</td>
   </tr>
   <tr>
     <td><b>inline_key_issues</b></td>
-    <td>If set to true, each key issue is published as an inline comment where the provider supports verified inline-comment publication (GitHub, Bitbucket Cloud, Azure DevOps, GitLab, Gitea). A finding leaves the review summary when a matching comment exists or the provider accepts the new comment. Findings that cannot be anchored or published stay in the summary.</td>
+    <td>If set to true (the default), each key issue is published as an inline comment where the provider supports verified inline-comment publication (GitHub, Bitbucket Cloud, Azure DevOps, GitLab, Gitea). A finding leaves the review summary when a matching comment exists or the provider accepts the new comment. Findings that cannot be anchored or published stay in the summary. A finding that carries a fix is published as a committable suggestion when `pr_code_suggestions.committable_code_suggestions` is true, the fix is at most ten lines and its `existing_code` matches the file at the finding's lines; otherwise the fix appears as a code block in the comment.</td>
   </tr>
 </table>
 
@@ -220,7 +219,22 @@ for the authoritative default values.
   </tr>
   <tr>
     <td><b>require_merge_recommendation</b></td>
-    <td>If set to true, the command will add a section describing what the review found: no_concerns_found (no important blockers or risks identified), needs_review (seems acceptable but deserves focused reviewer attention) or changes_required (clear issues to fix before merge). The value reports the model's findings, not a guarantee about the code.</td>
+    <td>If set to true, the command publishes a recommendation computed from deterministic checks. Only passing checks
+    allow no_concerns_found; needs_review means a check did not pass or could not be evaluated, and changes_required
+    reflects a model veto. The value reports the review's findings, not a guarantee about the code. See
+    <a href="#merge-recommendation">Merge recommendation</a>.</td>
+  </tr>
+  <tr>
+    <td><b>publish_merge_recommendation_status</b></td>
+    <td>If set to true with <code>require_merge_recommendation</code>, publishes the verdict on the reviewed commit.
+    GitHub uses the <code>PR Agent - Review</code> check; GitLab uses a commit status. <code>needs_review</code>
+    publishes as neutral on GitHub and skipped on GitLab, so it does not block a merge; <code>changes_required</code>
+    publishes as a failure.</td>
+  </tr>
+  <tr>
+    <td><b>max_changed_lines</b></td>
+    <td>Host-only changed-line cap for <code>no_concerns_found</code>. A larger diff makes the recommendation
+    <code>needs_review</code> at best. The cap counts added and removed lines.</td>
   </tr>
   <tr>
     <td><b>require_failure_modes</b></td>
@@ -373,6 +387,26 @@ In the code feedback section, emphasize the following:
 Use triple quotes to write multi-line instructions. Use bullet points to make the instructions more readable.
 :::
 
+### Fixes and committable suggestions
+
+A finding can carry a fix: the model adds `existing_code` (the lines it wants to change, copied from the file) and
+`improved_code` (their replacement) when a concrete change resolves the issue. A finding without a clear fix has neither field.
+
+When `inline_key_issues` is on (the default) and the provider can verify inline comments (GitHub, Bitbucket Cloud, Azure DevOps,
+GitLab, Gitea), each finding is posted as an inline comment. If `pr_code_suggestions.committable_code_suggestions` is true and
+`existing_code` matches the file at the finding's lines, the fix is posted as a committable suggestion that you can apply from the
+PR page. Otherwise the fix is shown as a text block in the comment. A finding that is not posted inline (the provider cannot verify
+inline comments, `inline_key_issues` is off, or publishing failed) stays in the review summary, and its fix appears there as a text
+block. Findings are capped by `pr_reviewer.num_max_findings` (6 by default), and chunked reviews keep the same cap.
+
+Two `pr_code_suggestions` settings are honoured: `committable_code_suggestions` and `extra_instructions`
+(added to the review's extra instructions when it differs from `pr_reviewer.extra_instructions`).
+Every other `pr_code_suggestions` setting is ignored since 0.51.
+
+```
+/review --pr_code_suggestions.committable_code_suggestions=true
+```
+
 ### Reviewing each commit separately
 
 :::tip
@@ -407,8 +441,7 @@ fingerprint includes its SHA.
 
 Set `publish_output_no_suggestions = false` in the `[pr_reviewer]` section
 (`--pr_reviewer.publish_output_no_suggestions=false` on the command line) to skip the comment of a commit where
-nothing was found. The setting of the same name in
-`[pr_code_suggestions]` applies to `/improve` only.
+nothing was found.
 With `inline_key_issues = true`, each finding is published as an inline comment on the commit it was found in,
 anchored to that commit's own diff, so GitHub and GitLab show it as outdated once a later commit changes those lines.
 A finding that cannot be anchored there, for example because its line is outside that commit's diff or the provider
@@ -653,3 +686,59 @@ pattern has a 50 ms limit, and each custom pattern has 1 s in total per review. 
 PR-Agent logs a warning and skips that pattern for the rest of the review.
 
 :::
+
+### Merge recommendation
+
+When `require_merge_recommendation` is enabled, PR-Agent computes the recommendation from deterministic checks;
+the model can only make it more cautious. `no_concerns_found` requires passing CI on the reviewed head, a current
+head, human authors, no sensitive paths or risky changes, and a diff within `max_changed_lines`. A check that
+cannot be evaluated fails closed. The review includes each check and its result.
+
+When `publish_merge_recommendation_status` is enabled, PR-Agent publishes the verdict against the exact head SHA
+that was reviewed. GitHub uses the `PR Agent - Review` check run and GitLab uses a commit status. `needs_review`
+publishes as neutral on GitHub and skipped on GitLab, so it does not block a merge. `changes_required` publishes
+as failure/failed and blocks merging when that status is required by branch protection or the project's merge rules.
+A new commit has no PR-Agent verdict status until it is reviewed.
+
+The line cap, sensitive-path patterns, and custom risky-shape patterns are host-only settings; repository,
+per-directory, and comment configuration cannot weaken or replace them. The verdict scans the complete PR diff,
+including ignored paths and files already reviewed by an incremental review. If the full diff or a trustworthy CI
+timestamp is unavailable, the verdict cannot be `no_concerns_found`.
+
+### Gated auto-approval
+
+:::warning
+
+Off by default. An approval counts toward a protected branch's required reviews, so enable it only where an
+automated approval of small, clean changes is acceptable. PR-Agent never merges.
+
+:::
+
+When the host sets `config.enable_auto_approval` (for example `CONFIG__ENABLE_AUTO_APPROVAL=true`), `/review` on
+GitHub approves the exact commit it reviewed when all of these hold:
+
+- the computed merge recommendation is `no_concerns_found`;
+- the model returned both a merge recommendation and a risk level, so `require_merge_recommendation` and
+  `require_risk_assessment` must be on;
+- the review covered the whole pull request: not an incremental review, no file left out or cut short to fit the
+  model's context, and no part of the diff failed;
+- the review completed and its finding state could be updated.
+
+Each `/review` run withdraws the approval PR-Agent gave when it starts, and approves again only when it ends with all
+of these holding, so a run that fails or finds a concern leaves no approval behind. On a push, a change of base branch or a reopen, the GitHub App and the GitHub Action dismiss it
+before any other event filter runs. PR-Agent only dismisses approvals it gave automatically; manual approvals from
+the same account are left alone. With `publish_output` off, nothing is approved or dismissed.
+
+`enable_auto_approval` is host-only: a repository `.pr_agent.toml` or a comment argument cannot turn it on.
+
+**Required repository settings.**
+
+- Turn on "Dismiss stale pull request approvals when new commits are pushed" in the branch protection rule or
+  ruleset. PR-Agent can miss a push (a failed webhook delivery, a polling deployment, or a workflow that does not
+  listen to `synchronize`), and GitHub only removes a stale approval itself when this is on.
+- For the GitHub Action, allow "GitHub Actions to create and approve pull requests" in the repository's Actions
+  settings. Pull requests from forks get a read-only token, so they cannot be approved.
+- If the rule restricts who can dismiss reviews, include PR-Agent's account; otherwise it cannot withdraw its own
+  approval, and only logs an error.
+
+GitHub does not let an account approve a pull request it opened. Other git providers are not supported yet.

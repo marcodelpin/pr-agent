@@ -61,7 +61,7 @@ See [Configuration options](../usage-guide/configuration_options.md#global-confi
 | `per_directory_settings_max_tree_pages` | 10 | maximum GitLab recursive-tree pages (100 entries each); skip nested settings if discovery is incomplete. Root/host-controlled, independent of the settings-file cap. |
 | `extra_config_url` | "" | optional URL or path to an additional .pr_agent.toml merged before the repo-local config; also settable via --extra_config_url or PR_AGENT_EXTRA_CONFIG_URL. See docs/docs/usage-guide/configuration_options.md#external-configuration-url. |
 | `disable_auto_feedback` | false |  |
-| `enable_auto_approval` | false | when true, /review may auto-approve a PR via auto_approve_logic(); that caller is currently commented out |
+| `enable_auto_approval` | false | host-only. /review approves the reviewed GitHub commit when every gated-approval check passes, and withdraws it otherwise; see docs/docs/commands/review.md |
 | `ai_timeout` | 120 | 2 minutes |
 | `http_request_timeout` | 60 | host-only connect/read inactivity seconds for GitLab/Gitea and direct Bitbucket/Gerrit HTTP attempts; capped at 600 |
 | `retry_same_model_on_timeout` | true | when false, a timed-out call is not retried on the same model and moves on to fallback_models |
@@ -170,6 +170,8 @@ See [Review](../commands/review.md#configuration-options).
 | `require_ticket_analysis_review` | true |  |
 | `require_risk_assessment` | false | ask the model for an overall risk level (low/medium/high) |
 | `require_merge_recommendation` | false | ask the model for a merge recommendation: no_concerns_found (no important blockers or risks identified), needs_review (seems acceptable but deserves focused reviewer attention) or changes_required (clear issues to fix before merge) |
+| `max_changed_lines` | 100 | Host-only changed-line cap; a larger diff vetoes no_concerns_found. See docs/docs/commands/review.md |
+| `publish_merge_recommendation_status` | false | Publish the computed verdict as a SHA-scoped check/commit status. See docs/docs/commands/review.md |
 | `require_failure_modes` | false | ask for up to three concrete failure scenarios and their detection/coverage |
 | `require_artifact_findings` | false | with a CI artifact, list up to five neutral facts from it, each with a quote checked against the artifact. See docs/docs/commands/review.md |
 | `require_priority_files` | false | ask the model which files a human should inspect first |
@@ -191,9 +193,9 @@ See [Review](../commands/review.md#configuration-options).
 | `persistent_finding_state` | true | Persist review finding state across complete review runs. |
 | `max_previous_findings_chars` | 8000 | Character budget for the findings stored by earlier reviews, given to /review as context so it keeps their wording instead of re-raising them reworded, and skips findings whose GitHub or GitLab inline thread someone other than PR-Agent resolved (needs persistent_finding_state); 0 disables it. |
 | `show_previous_findings_summary` | true | Show a 'Since the last review' section at the top of the review: addressed, reappeared, still-open and new findings (needs persistent_finding_state). |
-| `inline_key_issues` | false | Publish each review finding as an inline comment where the provider can verify inline-comment publication (GitHub, Bitbucket Cloud, Azure DevOps, GitLab, Gitea). |
+| `inline_key_issues` | true | Publish each review finding as an inline comment where the provider can verify inline-comment publication (GitHub, Bitbucket Cloud, Azure DevOps, GitLab, Gitea). Findings with a fix become committable suggestions when pr_code_suggestions.committable_code_suggestions is on. Set to false to keep every finding in the review summary. |
 | `extra_instructions` | "" |  |
-| `num_max_findings` | 3 |  |
+| `num_max_findings` | 6 | maximum number of key issues /review reports (integer; default 6) |
 | `final_update_message` | true |  |
 
 Azure DevOps also supplies verified PR-Agent inline key issues as dismissed when their status is `wontFix`
@@ -282,7 +284,7 @@ See [Ask](../commands/ask.md#configuration-options).
 
 ## `[pr_code_suggestions]` — /improve {#pr_code_suggestions-improve}
 
-See [Improve](../commands/improve.mdx#configuration-options).
+See [Fixes and committable suggestions](../commands/review.md#fixes-and-committable-suggestions).
 
 | Key | Default | Description |
 | --- | --- | --- |
@@ -295,7 +297,7 @@ See [Improve](../commands/improve.mdx#configuration-options).
 | `enable_chat_text` | false |  |
 | `persistent_comment` | true |  |
 | `publish_failure_comment` | true | Set to false to suppress /improve failure comments without changing the command's failure status. |
-| `max_history_len` | 4 | Previous sets to retain; <=0 keeps latest only (same comment if editable). See https://docs.pr-agent.ai/commands/improve#configuration-options |
+| `max_history_len` | 4 | Previous sets to retain; <=0 keeps latest only (same comment if editable). |
 | `publish_output_no_suggestions` | true |  |
 | `enable_suggestions_coverage_footer` | true | show failed chunks and files omitted by the token or AI-call budget |
 **suggestions scoring**
@@ -385,7 +387,7 @@ See [GitHub](../installation/github.md#run-as-a-github-app).
 | `base_url` | "https://api.github.com" |  |
 | `try_fix_invalid_inline_comments` | true |  |
 | `ignore_bot_pr` | true |  |
-| `publish_as_check_run` | false | when true, publish review/description/improve output as GitHub Checks instead of PR comments |
+| `publish_as_check_run` | false | when true, publish review/description output as GitHub Checks instead of PR comments |
 
 
 ## `[github_action_config]` {#github_action_config}
@@ -413,7 +415,7 @@ See [GitHub App](../usage-guide/automations_and_usage.md#github-app).
 | `webhook_delivery_deduplication` | false | Opt in to in-memory deduplication by X-GitHub-Delivery within each worker process. Active work stays protected; completed IDs expire after the deployment's push_trigger_pending_tasks_ttl (read at startup, 300 seconds by default). Failed or cancelled work can retry immediately. Repeated deliveries do not extend the TTL. Manual redeliveries are also suppressed during this window. State is cleared on restart and is not shared across workers or replicas. |
 | `handle_push_trigger` | false | settings for "pull_request" event with "synchronize" action - used to detect and handle push triggers for new commits |
 | `push_trigger_ignore_bot_commits` | true |  |
-| `push_trigger_ignore_merge_commits` | true |  |
+| `push_trigger_ignore_merge_commits` | true | skip push_commands when the push only merges the base branch into the previous head, as "Update branch" does |
 | `push_trigger_pending_tasks_backlog` | true | GitHub App only. Keep one queued push-trigger task per PR instead of dropping it; other servers always queue. |
 | `push_trigger_pending_tasks_ttl` | 300 | GitHub App only. Seconds idle per-PR push-trigger state is kept (other servers: 300); also the dedupe window when webhook_delivery_deduplication is on. |
 | `push_commands` | ["/describe", "/review"] |  |
@@ -429,14 +431,14 @@ See [GitLab](../usage-guide/automations_and_usage.md#gitlab-webhook).
 | `expand_submodule_diffs` | false | Submodule targets must also be listed in config.repo_context_sibling_repos. |
 | `feedback_on_draft_pr` | false |  |
 | `publish_review_as_thread` | false | Post the /review summary as a resolvable thread (discussion) instead of a plain note. |
-| `publish_improve_as_thread` | false | Post the /improve suggestions comment as a resolvable thread (discussion) instead of a plain note. |
+| `publish_improve_as_thread` | false | Ignored: /improve runs /review, so there is no suggestions comment. Use publish_review_as_thread. |
 | `reply_to_trigger_comment` | false | Reply in the triggering GitLab discussion for `/review`, `/improve`, or `/ask` (true/false); see docs/docs/usage-guide/additional_configurations.md. |
 | `publish_code_suggestions_as_review` | false | When pr_code_suggestions.committable_code_suggestions is true, queue each suggestion as a GitLab draft note and publish them all together in one batch (like GitLab's own "start a review" flow) instead of posting each as its own live discussion - and its own notification - as soon as it's created. |
 | `resolve_outdated_inline_threads` | false | Resolve the bot's own inline threads that a later push left on an outdated diff version. |
 | `auto_resolve_fixed_inline_threads` | false | Resolve the bot's own inline threads whose flagged line was modified after the comment was posted - i.e. the diff between the comment's head sha and the current head sha removes/replaces that line. Unlike resolve_outdated_inline_threads this is content-based: threads on lines nobody touched (or merely shifted by unrelated insertions) stay open. |
 | `handle_push_trigger` | false |  |
 | `push_commands` | ["/describe", "/review"] |  |
-| `handle_reviewer_assignment` | false | Auto-trigger commands when the bot is assigned as a reviewer on an MR |
+| `handle_reviewer_assignment` | false | Auto-trigger commands when the bot is assigned or explicitly re-requested as a reviewer on an MR |
 | `reviewer_commands` | ["/review"] |  |
 | `ignore_user_ids` | [] | Numeric GitLab user IDs whose merge request and note events are skipped, checked before the config.bot_user_indicators display-name match. IDs are stable, unlike display names. Host-only: the check runs before repository settings are loaded (e.g. `GITLAB__IGNORE_USER_IDS=123`). |
 
@@ -704,7 +706,7 @@ See [Push outputs](../usage-guide/push_outputs.md#configuration).
 | --- | --- | --- |
 | `enable` | false |  |
 | `channels` | [] | exact names as a list/tuple or comma-separated string: "stdout", "file", "webhook", "slack", "telegram", "teams"; empty emits nothing |
-| `commands` | ["review", "describe", "improve"] | output types to deliver; add "ask" to include Q&A, or select fewer commands; supports comma-separated strings |
+| `commands` | ["review", "describe"] | output types to deliver; add "ask" to include Q&A, or select fewer commands; supports comma-separated strings |
 | `file_path` | "pr-agent-outputs/reviews.jsonl" | used by the "file" channel |
 | `webhook_url` | "" | used by the "webhook" channel: generic JSON POST target. Must be an absolute https:// URL |
 | `slack_webhook_url` | "" | used by the "slack" channel: a Slack Incoming Webhook URL. Must be an absolute https:// URL |

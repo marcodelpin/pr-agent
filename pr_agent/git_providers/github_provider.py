@@ -25,13 +25,17 @@ from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, stop
 from pr_agent.agent.request_policy import policy_metadata, policy_value
 
 from ..algo.comment_identity import (
+    PRApprovalIdentity,
     comment_matches_any_identity,
+    comment_matches_identity,
     get_pr_review_comment_identifiers,
+    render_hidden_marker,
 )
 from ..algo.file_filter import filter_ignored
 from ..algo.git_patch_processing import count_patch_lines, extract_hunk_headers
 from ..algo.inline_comment_dedup import (
     KEY_ISSUE_LOCATION_MARKER_RE,
+    TEXT_FIX_INFO,
     body_fingerprint,
     body_with_markers,
     code_fingerprint,
@@ -475,6 +479,26 @@ class GithubProvider(GitProvider):
                          parents=tuple(parent.sha for parent in commit.parents))
                 for commit in self.pr.get_commits()]
 
+    def is_base_branch_merge(self, sha: str, previous_head: str) -> bool:
+        """Whether commit `sha` only merges the base branch into `previous_head`, as "Update branch" does.
+
+        The commit must have exactly two parents: `previous_head` first, so nothing else was committed on top of
+        it, then a commit on the base branch. The PR's commits were read with their parents when the PR loaded,
+        so one of them costs no request, and neither does a second parent that is the PR's base commit. Any other
+        commit is read from the repository, and any other second parent is compared with the base branch.
+        """
+        loaded = [*(getattr(self, "pr_commits", None) or []), getattr(self, "last_commit_id", None)]
+        commit = next((commit for commit in loaded if getattr(commit, "sha", None) == sha), None)
+        if commit is None:
+            commit = self._get_repo().get_commit(sha)
+        parents = [parent.sha for parent in commit.parents]
+        if len(parents) != 2 or parents[0] != previous_head:
+            return False
+        if parents[1] == self.pr.base.sha:
+            return True
+        # "ahead" or "identical": the second parent is an ancestor of the base branch's head, or that head.
+        return self._get_repo().compare(parents[1], self.pr.base.ref).status in ("ahead", "identical")
+
     def set_commit_review_scope(self, commit: PRCommit, incremental: IncrementalPR) -> str | None:
         self.incremental = incremental
         self.diff_files = None
@@ -592,6 +616,9 @@ class GithubProvider(GitProvider):
         never falls back to the incremental-aware listing.
         """
         return self._get_complete_files()
+
+    def get_verdict_diff_files(self) -> list:
+        return list(self._get_complete_files())
 
     def get_num_of_files(self):
         if hasattr(self.git_files, "totalCount"):
@@ -1116,6 +1143,34 @@ class GithubProvider(GitProvider):
             return True
         return False
 
+    def publish_merge_recommendation_status(self, recommendation: str) -> bool:
+        """Publish the computed verdict as the review check's conclusion."""
+        conclusions = {
+            "no_concerns_found": "success",
+            "needs_review": "neutral",
+            "changes_required": "failure",
+        }
+        conclusion = conclusions.get(recommendation)
+        if conclusion is None:
+            get_logger().warning(f"Cannot publish an unknown merge recommendation: {recommendation!r}")
+            return False
+
+        name = "review"
+        body = {
+            "status": "completed",
+            "conclusion": conclusion,
+            "output": {
+                "title": self._check_run_name(name),
+                "summary": f"Computed merge recommendation: {recommendation}",
+            },
+        }
+        if self._upsert_check_run(name, body, update_body={"status": "completed", "conclusion": conclusion}):
+            self._check_runs_in_progress.discard(name)
+            self._check_run_base_summaries.pop(name, None)
+            self._check_runs_progress_blocked.discard(name)
+            return True
+        return False
+
     def start_check_run(self, name: str, summary: str) -> bool:
         """Open the command's check run as in_progress before it has any output to publish.
 
@@ -1182,7 +1237,7 @@ class GithubProvider(GitProvider):
             return True
         return False
 
-    def _upsert_check_run(self, name: str, body: dict) -> bool:
+    def _upsert_check_run(self, name: str, body: dict, update_body: dict | None = None) -> bool:
         """Update the `PR Agent - {Name}` check run on the head commit, creating it if absent."""
         if not getattr(self, 'last_commit_id', None):
             get_logger().error("Cannot publish check run without a commit SHA")
@@ -1196,7 +1251,7 @@ class GithubProvider(GitProvider):
             # `github-actions`, shared with every other workflow, so the app
             # alone cannot identify it.
             create_body.setdefault("external_id", run_id)
-        update_body = body
+        update_body = body if update_body is None else update_body
         existing_id = self._check_run_ids.get(name)
         if not existing_id:
             existing_id = self._find_existing_check_run(check_run_name, self.last_commit_id.sha)
@@ -1703,7 +1758,11 @@ class GithubProvider(GitProvider):
                     # block may be fenced with more than three backticks.
                     fence = opener.group(1)
                     before, rest = comment["body"][:opener.start()], comment["body"][opener.end():]
-                    fixed_comment["body"] = before + rest.rsplit(fence, 1)[-1]
+                    if KEY_ISSUE_LOCATION_MARKER_RE.search(comment["body"]):
+                        # A review finding leaves its summary once posted, so its fix stays as plain text.
+                        fixed_comment["body"] = f"{before}{fence}{TEXT_FIX_INFO}{rest}"
+                    else:
+                        fixed_comment["body"] = before + rest.rsplit(fence, 1)[-1]
                 if "start_line" in comment:
                     fixed_comment["line"] = comment["start_line"]
                     del fixed_comment["start_line"]
@@ -2617,17 +2676,19 @@ class GithubProvider(GitProvider):
 
         return sub_issues
 
-    def auto_approve(self) -> bool:
+    def auto_approve(self, body: str = "") -> bool:
         """Approve the PR head that was reviewed, not whatever head exists now.
 
         The approval is pinned to the head SHA the provider snapshot was read for
         (``self._pr_revision_loaded``), and skipped when the PR has moved since, so a
         push made between the review and the approval cannot mark unreviewed commits
-        as approved.
+        as approved. An approval that cannot be attributed to PR-Agent is dismissed
+        straight away, since `revoke_auto_approval` would never find it again.
         """
-        reviewed_head_sha = self._pr_revision_loaded[0] if self._pr_revision_loaded else None
+        reviewed_head_sha, reviewed_base_sha = (self._pr_revision_loaded or (None, None))[:2]
         try:
-            current_head_sha = policy_value(self._get_pr(), "head", "sha")
+            current_pr = self._get_pr()
+            current_head_sha = policy_value(current_pr, "head", "sha")
             if reviewed_head_sha and current_head_sha and current_head_sha != reviewed_head_sha:
                 get_logger().info(
                     f"Skipping auto-approve: the PR head moved from {reviewed_head_sha} "
@@ -2636,15 +2697,71 @@ class GithubProvider(GitProvider):
                 return False
             if not reviewed_head_sha:
                 return False
+            # A retarget changes the reviewed diff without moving the head.
+            if not reviewed_base_sha or policy_value(current_pr, "base", "sha") != reviewed_base_sha:
+                get_logger().info("Skipping auto-approve: the PR base changed after it was read")
+                return False
+            marker = render_hidden_marker(PRApprovalIdentity.AUTO.value, self)
             res = self.pr.create_review(
-                event="APPROVE", commit=self._get_repo().get_commit(reviewed_head_sha)
+                event="APPROVE",
+                commit=self._get_repo().get_commit(reviewed_head_sha),
+                body=f"{marker}\n{body}" if body else marker,
             )
-            if res.state == "APPROVED":
-                return True
-            return False
+            if res.state != "APPROVED":
+                return False
+            try:
+                authored = self.is_comment_authored_by_pr_agent(res)
+            except RuntimeError as e:
+                get_logger().warning(f"Cannot attribute the approval to PR-Agent: {e}")
+                authored = False
+            if not authored:
+                try:
+                    res.dismiss("PR-Agent could not confirm this approval was its own")
+                except (GithubException, RequestException) as e:
+                    get_logger().error(f"An approval PR-Agent cannot attribute is still in place, error: {e}")
+                return False
+            # A push between the check above and the approval may have been revoked before this
+            # approval existed, so check again and withdraw it if the PR moved.
+            try:
+                moved_pr = self._get_pr()
+                moved = (policy_value(moved_pr, "head", "sha") != reviewed_head_sha
+                         or policy_value(moved_pr, "base", "sha") != reviewed_base_sha)
+            except (GithubException, RequestException) as e:
+                get_logger().warning(f"Cannot confirm the PR did not move during approval: {e}")
+                moved = True
+            if moved:
+                try:
+                    res.dismiss("The pull request changed while PR-Agent was approving it")
+                except (GithubException, RequestException) as e:
+                    get_logger().error(f"An approval of a moved pull request is still in place, error: {e}")
+                return False
+            return True
         except (GithubException, RequestException, AttributeError) as e:
             get_logger().exception(f"Failed to auto-approve, error: {e}")
             return False
+
+    def revoke_auto_approval(self, reason: str) -> bool:
+        """Dismiss the approvals PR-Agent gave automatically; True when none remains.
+
+        Only reviews carrying the auto-approval marker count: with a personal token or the
+        shared Actions identity, the same login also holds approvals PR-Agent did not create.
+        """
+        try:
+            reviews = list(self.pr.get_reviews())
+        except (GithubException, RequestException, AttributeError) as e:
+            get_logger().exception(f"Failed to list reviews to dismiss PR-Agent approvals, error: {e}")
+            return False
+        all_dismissed = True
+        for review in reviews:
+            try:
+                if (review.state == "APPROVED"
+                        and comment_matches_identity(review.body, PRApprovalIdentity.AUTO.value)
+                        and self.is_comment_authored_by_pr_agent(review)):
+                    review.dismiss(reason)
+            except (GithubException, RequestException, AttributeError, RuntimeError) as e:
+                get_logger().exception(f"Failed to dismiss a PR-Agent approval, error: {e}")
+                all_dismissed = False
+        return all_dismissed
 
     def _is_own_check_run(self, run, own_app_login: str) -> bool:
         """Return whether `run` was published by the running PR-Agent app.
