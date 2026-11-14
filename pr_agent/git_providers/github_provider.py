@@ -773,9 +773,6 @@ class GithubProvider(GitProvider):
                             f"Cannot reconstruct GitHub patch for {file.filename}: content read failed")
                     else:
                         patch = load_large_diff(file.filename, new_file_content_str, original_file_content_str)
-                    if incremental_active:
-                        self.unreviewed_files_map[file.filename] = patch
-
 
                 if file.status == 'added':
                     edit_type = EDIT_TYPE.ADDED
@@ -948,6 +945,9 @@ class GithubProvider(GitProvider):
                     cache[(self.repo, sha, path)] = text
 
     def publish_description(self, pr_title: str, pr_body: str):
+        # GitHub refuses a body over 65,536 characters (HTTP 422), the limit its comments have too, and the
+        # file walkthrough of a large PR can pass it.
+        pr_body = self.limit_description_characters(pr_body, self.max_comment_chars)
         if pr_title is None:
             self.pr.edit(body=pr_body)
         else:

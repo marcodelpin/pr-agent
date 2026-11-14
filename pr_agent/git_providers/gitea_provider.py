@@ -19,6 +19,7 @@ from pr_agent.algo.git_patch_processing import (
     split_diff_lines,
 )
 from pr_agent.algo.language_handler import is_valid_file
+from pr_agent.algo.setting_utils import _as_bool_setting
 from pr_agent.algo.token_budget import clip_tokens
 from pr_agent.algo.types import EDIT_TYPE
 from pr_agent.algo.utils import find_line_number_of_relevant_line_in_file
@@ -162,7 +163,7 @@ class GiteaProvider(GitProvider):
         configuration.host = f"{self.base_url}/api/v1"
         configuration.api_key['Authorization'] = f'token {self.gitea_access_token}'
 
-        if get_settings().get("GITEA.SKIP_SSL_VERIFICATION", False):
+        if _as_bool_setting(get_settings().get("GITEA.SKIP_SSL_VERIFICATION", False)):
             configuration.verify_ssl = False
 
         # Use custom cert (self-signed)
@@ -217,6 +218,38 @@ class GiteaProvider(GitProvider):
             self.issue_url = url
             self.__set_repo_and_owner_from_issue()
             self.enabled_issue = True
+
+    def reset_diff_cache_for_command(self) -> None:
+        """Refresh the PR and discard revision-bound state before another automatic command."""
+        super().reset_diff_cache_for_command()
+        if not self.enabled_pr:
+            return
+        try:
+            pr = self.repo_api.get_pull_request(owner=self.owner, repo=self.repo, pr_number=self.pr_number)
+        except ApiException as exc:
+            if exc.status not in (500, 502, 503, 504):
+                raise
+            # Retry one read-only request, never fall back to a stale PR revision.
+            pr = self.repo_api.get_pull_request(owner=self.owner, repo=self.repo, pr_number=self.pr_number)
+        head, base = getattr(pr, "head", None), getattr(pr, "base", None)
+        if head is None or base is None:
+            raise ValueError("Gitea PR refresh returned incomplete head/base metadata")
+        head_sha, base_sha, base_ref = head.sha or "", base.sha or "", base.ref or ""
+        if not (head_sha and base_sha and base_ref):
+            raise ValueError("Gitea PR refresh returned incomplete revision metadata")
+        merge_base = getattr(pr, "merge_base", None) or ""
+        # Read all metadata first so a failed refresh cannot leave mixed revisions.
+        self.pr, self.sha = pr, head_sha
+        self.base_sha, self.base_ref, self.merge_base = base_sha, base_ref, merge_base
+        self.git_files = None
+        self.file_diffs = None
+        self.filtered_diff_file_names = []
+        self.file_contents = {}
+        self.pr_commits = None
+        self.last_commit = _GiteaCommitAdapter({"sha": self.sha})
+        self.last_commit_id = self.last_commit
+        self.user_description = None
+        self._base_url_html = None
 
     @property
     def base_url_html(self) -> str:
@@ -326,6 +359,12 @@ class GiteaProvider(GitProvider):
                 parsed.setdefault(file.filename, []).append(file)
             if not parsed:
                 raise ValueError("Gitea raw diff is empty for a reviewable change")
+            # The raw diff endpoint is live, while file contents use the constructor's
+            # immutable head and merge base. Do not combine different PR revisions.
+            latest = self.repo_api.get_pull_request(owner=self.owner, repo=self.repo, pr_number=self.pr_number)
+            latest_base = getattr(latest, "merge_base", None) or latest.base.sha
+            if (latest.head.sha, latest_base) != (self.sha, self.merge_base or self.base_sha):
+                raise ValueError("Gitea PR diff revisions changed during acquisition")
             self.file_diffs = parsed
         except Exception as exc:
             self.file_diffs = None
@@ -333,7 +372,7 @@ class GiteaProvider(GitProvider):
             self.diff_files = None
             self.file_contents = {}
             raise IncompleteGiteaPullRequestFilesError(
-                "Gitea raw PR diff is unavailable or incomplete"
+                "Gitea raw PR diff is unavailable, incomplete, or stale"
             ) from exc
 
     @staticmethod
@@ -695,10 +734,13 @@ class GiteaProvider(GitProvider):
     def _get_file_content_from_base(self, filename: str) -> str:
         # Gitea and Forgejo diff a PR from its merge base, while base.sha is the current tip of
         # the target branch, so read the old side where the patch starts.
+        ref = self.merge_base or self.base_sha
+        if not ref:
+            raise IncompleteGiteaPullRequestFilesError("Gitea base content has no immutable revision")
         return self.repo_api.get_file_content(
             owner=self.owner,
             repo=self.repo,
-            commit_sha=self.merge_base or self.base_sha,
+            commit_sha=ref,
             filepath=filename,
             propagate_errors=True,
         )

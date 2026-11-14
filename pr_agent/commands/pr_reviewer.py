@@ -85,7 +85,12 @@ from pr_agent.algo.run_output import (
 from pr_agent.algo.setting_utils import _as_bool_setting
 from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.structural_reach import build_structural_reach
-from pr_agent.algo.suggestion_checks import dedent_code_for_file, python_syntax_is_valid, validate_suggestion
+from pr_agent.algo.suggestion_checks import (
+    dedent_code_for_file,
+    is_line_range_in_diff,
+    python_syntax_is_valid,
+    validate_suggestion,
+)
 from pr_agent.algo.token_budget import AttemptTokenBudget, clip_tokens
 from pr_agent.algo.utils import (
     ModelType,
@@ -215,7 +220,7 @@ def _strip_line_numbers(code: str | None, start_line: int, end_line: int) -> str
     """Drop the diff's line-number prefix when every line of the model's code carries the expected one."""
     if not code:
         return code
-    lines = code.splitlines()
+    lines = split_diff_lines(code)
     if len(lines) != end_line - start_line + 1:
         return code
     stripped = []
@@ -457,7 +462,7 @@ class PRReviewer:
         except Exception as e:
             get_logger().error(f"Failed to list the PR commits or the commits already reviewed: {e}")
             self._publish_per_commit_failure(e)
-            if get_settings().config.get("propagate_tool_errors", False):
+            if get_settings().config.get("propagate_command_errors", False):
                 raise
             return
         if commits is None:
@@ -588,7 +593,7 @@ class PRReviewer:
                     get_logger().exception(f"Failed to publish the per commit review notice, error: {e}")
         if failed:
             record_command_failure()
-        if first_error is not None and get_settings().config.get("propagate_tool_errors", False):
+        if first_error is not None and get_settings().config.get("propagate_command_errors", False):
             raise first_error
 
     def _restore_full_scope(self) -> None:
@@ -2016,7 +2021,7 @@ class PRReviewer:
             get_logger().warning("Review finding points at a file that is not in the diff, "
                                  "keeping it in the summary", artifact={"relevant_file": relevant_file})
             return None
-        if not file.head_file or end_line > len(file.head_file.splitlines()):
+        if not is_line_range_in_diff(file, start_line, end_line):
             get_logger().warning("Review finding points past the end of the file, keeping it in the summary",
                                  artifact={"relevant_file": relevant_file, "start_line": start_line,
                                            "end_line": end_line})

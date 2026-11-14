@@ -334,7 +334,7 @@ See [Add Docs](../commands/add_docs.md#configuration-options).
 | Key | Default | Description |
 | --- | --- | --- |
 | `extra_instructions` | "" |  |
-| `docs_style` | "Sphinx" | "Google Style with Args, Returns, Attributes...etc", "Numpy Style", "Sphinx Style", "PEP257", "reStructuredText" |
+| `docs_style` | "Sphinx" | Docstring style: Google Style with Args, Returns, Attributes...etc; Numpy Style; Sphinx; PEP257; reStructuredText. See docs/docs/commands/add_docs.md. |
 
 
 ## `[pr_update_changelog]` — /update_changelog {#pr_update_changelog-update_changelog}
@@ -706,7 +706,7 @@ See [Push outputs](../usage-guide/push_outputs.md#configuration).
 | --- | --- | --- |
 | `enable` | false |  |
 | `channels` | [] | exact names as a list/tuple or comma-separated string: "stdout", "file", "webhook", "slack", "telegram", "teams"; empty emits nothing |
-| `commands` | ["review", "describe"] | output types to deliver; add "ask" to include Q&A, or select fewer commands; supports comma-separated strings |
+| `commands` | ["review", "describe"] | output types; opt in to "ask" or "update_changelog"; accepts comma-separated strings. See docs/docs/usage-guide/push_outputs.md |
 | `file_path` | "pr-agent-outputs/reviews.jsonl" | used by the "file" channel |
 | `webhook_url` | "" | used by the "webhook" channel: generic JSON POST target. Must be an absolute https:// URL |
 | `slack_webhook_url` | "" | used by the "slack" channel: a Slack Incoming Webhook URL. Must be an absolute https:// URL |
