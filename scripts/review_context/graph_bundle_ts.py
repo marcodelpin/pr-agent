@@ -353,6 +353,8 @@ class Tags(Lang):
         for extra in self.INHERITS.get(name, ()):
             try:
                 self.queries.append(Query(get_language(name), get_tags_query(extra)))
+            except TimeoutError:
+                raise
             except Exception:
                 pass  # a parent pattern naming a node type this grammar lacks
         self.ident, self.drop = IdentTypes(), CommentTypes()
@@ -743,6 +745,8 @@ def tags_langs():
             name = detect_language_from_extension(ext.lstrip("."))
             if name and (get_tags_query(name) or "").strip():
                 by_name.setdefault(name, []).append(ext)
+        except TimeoutError:
+            raise
         except Exception:
             continue
     return [Tags(name, tuple(exts)) for name, exts in sorted(by_name.items())]
@@ -2436,8 +2440,9 @@ if __name__ == "__main__":
         raise TimeoutError(f"build exceeded {a.timeout} s")
 
     signal.signal(signal.SIGALRM, _timeout)
-    signal.alarm(a.timeout)
     try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+        signal.alarm(a.timeout)
         LANGS[:] = tags_langs()
         build(a)
     except Exception as e:  # one line and exit 2, no bundle: the caller runs a diff-only review instead

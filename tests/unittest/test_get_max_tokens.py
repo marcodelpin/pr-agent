@@ -655,6 +655,8 @@ class TestGetMaxTokens:
         "vertex_ai/gemini-4-argon",
         "gemini/gemini-4-carbon",
         "vertex_ai/gemini-4-carbon",
+        "gemini/gemini-4-hydrogen",
+        "vertex_ai/gemini-4-hydrogen",
     ])
     def test_gemini_4_x_models_max_tokens(self, monkeypatch, model):
         fake_settings = type("", (), {
@@ -991,6 +993,18 @@ class TestGetMaxTokens:
         assert get_max_tokens(model) == 1000000
 
 
+
+    def test_opencode_go_model_max_tokens_from_litellm(self, monkeypatch):
+        fake_settings = type("", (), {
+            "config": type("", (), {
+                "custom_model_max_tokens": 0,
+                "max_model_tokens": 0
+            })()
+        })()
+
+        monkeypatch.setattr(token_budget, "get_settings", lambda: fake_settings)
+
+        assert get_max_tokens("opencode_go/deepseek-v4.1-flash") == 1000000
 
     @pytest.mark.parametrize(
         "model",
@@ -1462,6 +1476,8 @@ class TestNoLiteLLMDuplicates:
         "vertex_ai/gemini-4-argon",
         "gemini/gemini-4-carbon",
         "vertex_ai/gemini-4-carbon",
+        "gemini/gemini-4-hydrogen",
+        "vertex_ai/gemini-4-hydrogen",
         "openrouter/x-ai/grok-4.5",
         "openrouter/x-ai/grok-4.6",
         "openrouter/deepseek/deepseek-chat",

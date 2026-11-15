@@ -41,7 +41,7 @@ from pr_agent.algo.git_patch_processing import (
 from pr_agent.algo.i18n import t
 from pr_agent.algo.language_handler import build_language_file_matcher
 from pr_agent.algo.merge_verdict import render_merge_recommendation_checks
-from pr_agent.algo.output_models import PRType, SubPR, parse_failure_modes
+from pr_agent.algo.output_models import PRType, SubPR, finding_confidence, parse_failure_modes
 from pr_agent.algo.structural_reach import render_structural_reach
 from pr_agent.algo.types import FilePatchInfo
 from pr_agent.config_loader import get_bot_display_name, get_settings, get_verbosity_level
@@ -205,6 +205,15 @@ def replace_suggestion_blocks(body: str, replacement: str) -> str:
         position = end
     parts.append(body[position:])
     return "".join(parts)
+
+
+def get_min_finding_confidence() -> float:
+    """Return pr_reviewer.min_finding_confidence as a number; 0 (disabled) when unset, not numeric or outside 0-10."""
+    try:
+        threshold = float(get_settings().pr_reviewer.get("min_finding_confidence", 0))
+    except (TypeError, ValueError):
+        return 0
+    return threshold if 0 < threshold <= 10 else 0
 
 
 def convert_to_markdown_v2(output_data: dict,
@@ -493,6 +502,9 @@ def convert_to_markdown_v2(output_data: dict,
                         if issue_header.lower() == 'possible bug':
                             issue_header = t('review.possible_issue')  # Make the header less frightening
                         issue_content = issue.get('issue_content', '').strip()
+                        confidence = finding_confidence(issue) if get_min_finding_confidence() > 0 else None
+                        if confidence is not None:
+                            issue_header = f"{issue_header} (confidence: {confidence:g})"
                         start_line = _as_line(issue.get('start_line')) or 0
                         end_line = _as_line(issue.get('end_line')) or start_line
                         valid_lines = start_line > 0 and end_line >= start_line
@@ -1688,6 +1700,10 @@ def is_value_no(value):
     return False
 
 
+FILE_WALKTHROUGH_ESCAPED_MARKER = "<!-- pr-agent:file-walkthrough-escaped -->"
+_WALKTHROUGH_BLANK_LINE = re.compile(r"\r?\n\r?\n")
+
+
 class _WalkthroughFileMatch:
     """Keep the capture offsets available to walkthrough readback consumers."""
 
@@ -1769,13 +1785,14 @@ def _match_walkthrough_file(file_data: str) -> _WalkthroughFileMatch | None:
         marker_end = marker + (len("<li>") if marker == li_start else len("•"))
         detail_start = marker_end
     else:
-        divider = file_data.find("\n\n", body_start, details_end) if paragraph_allowed else -1
-        if divider == -1 and paragraph_allowed:
+        divider = _WALKTHROUGH_BLANK_LINE.search(file_data, body_start, details_end) if paragraph_allowed else None
+        if divider is None and paragraph_allowed:
             # Recover the separator after <hr> when none follows the filename.
-            divider = file_data.rfind("\n\n", hr_end, body_start)
-        if divider != -1:
-            marker = divider
-            detail_start = divider + 2
+            for match in _WALKTHROUGH_BLANK_LINE.finditer(file_data, hr_end, body_start):
+                divider = match
+        if divider is not None:
+            marker = divider.start()
+            detail_start = divider.end()
         else:
             marker = file_data.find("-", body_start, details_end)
             if marker == -1:
@@ -1790,41 +1807,145 @@ def _match_walkthrough_file(file_data: str) -> _WalkthroughFileMatch | None:
     ))
 
 
+def _find_walkthrough_start(description: str) -> int | None:
+    """Find a walkthrough boundary, skipping fences, blockquotes, and single-line code."""
+    excluded = []
+    fence_char = ""
+    fence_length = 0
+    list_content_indent = 0
+    offset = 0
+    lines = description.split("\n")
+    # Ignore unclosed top-level fences so a following generated walkthrough remains readable.
+    closers = [{}] * len(lines)
+    longest = {"`": 0, "~": 0}
+    for index in range(len(lines) - 1, -1, -1):
+        closers[index] = dict(longest)
+        bare = lines[index].strip()
+        if bare[:1] in longest and not bare.strip(bare[0]):
+            longest[bare[0]] = max(longest[bare[0]], len(bare))
+    for line_index, line in enumerate(lines):
+        expanded_line = line.expandtabs(4)
+        delimiter = expanded_line.lstrip(" ")
+        indent = len(expanded_line) - len(delimiter)
+        nonblank = bool(delimiter.strip())
+        # End an unclosed fence when its enclosing list item ends.
+        if fence_char and list_content_indent and nonblank and indent < list_content_indent:
+            fence_char = ""
+            fence_length = 0
+            list_content_indent = 0
+        if not fence_char:
+            list_marker = re.match(r"(?:[-+*]|\d{1,9}[.)]) +", delimiter)
+            if list_marker and (indent <= 3 or 0 <= indent - list_content_indent <= 3):
+                list_content_indent = indent + list_marker.end()
+                delimiter = delimiter[list_marker.end():]
+                indent = list_content_indent
+            elif nonblank and indent < list_content_indent:
+                list_content_indent = 0
+        effective_indent = indent - list_content_indent if indent >= list_content_indent else indent
+        # Account for indentation inside list items and marker templates.
+        literal = bool(fence_char) or delimiter.startswith(">")
+        if effective_indent <= 3 and delimiter[:1] in ("`", "~"):
+            char = delimiter[0]
+            length = len(delimiter) - len(delimiter.lstrip(char))
+            if fence_char:
+                if char == fence_char and length >= fence_length and not delimiter[length:].strip():
+                    fence_char = ""
+            elif 3 <= length <= closers[line_index][char] and (char != "`" or "`" not in delimiter[length:]):
+                fence_char, fence_length = char, length
+                literal = True
+        if literal:
+            excluded.append((offset, offset + len(line) + 1))
+        else:
+            # Pair equal-length backtick runs, leaving unmatched runs as prose.
+            runs = list(re.finditer(r"`+", line))
+            runs_by_length = {}
+            for index, run in enumerate(runs):
+                runs_by_length.setdefault(len(run.group()), []).append(index)
+            index = 0
+            while index < len(runs):
+                opener = runs[index]
+                same_length = runs_by_length[len(opener.group())]
+                next_same = bisect.bisect_right(same_length, index)
+                if next_same == len(same_length):
+                    index += 1
+                    continue
+                closer_index = same_length[next_same]
+                excluded.append((offset + opener.start(), offset + runs[closer_index].end()))
+                index = closer_index + 1
+        offset += len(line) + 1
+
+    excluded_starts = [start for start, _ in excluded]
+    comments = []
+    # Keep outer comments around nested escaped-file markers without hiding a later real walkthrough.
+    comment_stack = []
+    comment_line_index = 0
+    comment_line_end = len(lines[0])
+    standalone_line = lines[0].strip() == "-->"
+    comment_start = description.find("<!--")
+    comment_end = description.find("-->")
+    while comment_start != -1 or comment_end != -1:
+        if comment_start != -1 and (comment_end == -1 or comment_start < comment_end):
+            if not comment_stack:
+                previous = bisect.bisect_right(excluded_starts, comment_start) - 1
+                if previous >= 0 and comment_start < excluded[previous][1]:
+                    comment_start = description.find("<!--", comment_start + 4)
+                    continue
+            if comment_stack:
+                comment_stack[-1][1] = True
+            comment_stack.append([comment_start, False])
+            comment_start = description.find("<!--", comment_start + 4)
+            continue
+        if comment_stack:
+            start, nested = comment_stack[-1]
+            # After a nested marker, require an explicit outer closer, not an arrow in file text.
+            if len(comment_stack) == 1 and nested:
+                # Advance once per line, including when many closers share one long line.
+                while comment_end > comment_line_end:
+                    comment_line_index += 1
+                    comment_line_end += len(lines[comment_line_index]) + 1
+                    standalone_line = lines[comment_line_index].strip() == "-->"
+            if len(comment_stack) > 1 or not nested or standalone_line:
+                comment_stack.pop()
+                if not comment_stack:
+                    previous = bisect.bisect_right(excluded_starts, start) - 1
+                    if previous < 0 or start >= excluded[previous][1]:
+                        comments.append((start, comment_end + 3))
+        comment_end = description.find("-->", comment_end + 3)
+    comment_starts = [start for start, _ in comments]
+    wrapper = (r"<details(?=[\s>])[^<>]*>\s*<summary>\s*<h3>\s*"
+               + re.escape(_ci.PRDescriptionHeader.FILE_WALKTHROUGH.value) + r"\s*</h3>\s*</summary>")
+    # Recognize marker templates by this table and a semantic file row without the outer wrapper.
+    table = (
+        re.escape('<table><thead><tr><th></th><th align="left">Relevant files</th></tr></thead><tbody>')
+        + r'<tr><td><strong>[^<>]*</strong></td><td>'
+        + r'(?:<details><summary>\d+ files</summary>)?<table>\s*<tr>\s*<td>\s*'
+        + r'(?:<details>\s*<summary>)?<strong>'
+    )
+    # Prefer the explicit wrapper; an earlier bare table may be user content.
+    # Keep the marker fallback at or after the former text boundary.
+    table_start = description.find(_ci.PRDescriptionHeader.FILE_WALKTHROUGH.value)
+    for pattern, start in ((wrapper, 0), (table, table_start)):
+        for match in re.compile(pattern).finditer(description, max(0, start)):
+            previous = bisect.bisect_right(excluded_starts, match.start()) - 1
+            comment_index = bisect.bisect_right(comment_starts, match.start()) - 1
+            if ((previous < 0 or match.start() >= excluded[previous][1]) and
+                    (comment_index < 0 or match.start() >= comments[comment_index][1])):
+                return match.start()
+    return None
+
+
 def process_description(description_full: str) -> tuple[str, list]:
     if not description_full:
         return "", []
+    if _ci.PRDescriptionHeader.FILE_WALKTHROUGH.value not in description_full:
+        return description_full.strip(), []
 
-    # description_split = description_full.split(_ci.PRDescriptionHeader.FILE_WALKTHROUGH.value)
-    if _ci.PRDescriptionHeader.FILE_WALKTHROUGH.value in description_full:
-        try:
-            # FILE_WALKTHROUGH are presented in a collapsible section in the description
-            regex_pattern = (r"<details.*?>\s*<summary>\s*<h3>\s*"
-                             + re.escape(_ci.PRDescriptionHeader.FILE_WALKTHROUGH.value) + r"\s*</h3>\s*</summary>")
-            description_split = re.split(regex_pattern, description_full, maxsplit=1, flags=re.DOTALL)
-
-            # If the regex pattern is not found, fallback to the previous method
-            if len(description_split) == 1:
-                get_logger().debug("Could not find regex pattern for file walkthrough, falling back to simple split")
-                description_split = description_full.split(_ci.PRDescriptionHeader.FILE_WALKTHROUGH.value, 1)
-        except Exception as e:
-            get_logger().warning(f"Failed to split description using regex, falling back to simple split: {e}")
-            description_split = description_full.split(_ci.PRDescriptionHeader.FILE_WALKTHROUGH.value, 1)
-
-        if len(description_split) < 2:
-            get_logger().error("Failed to split description into base and changes walkthrough",
-                               artifact={"description": description_full})
-            return description_full.strip(), []
-
-        base_description_str = description_split[0].strip()
-        changes_walkthrough_str = ""
-        files = []
-        if len(description_split) > 1:
-            changes_walkthrough_str = description_split[1]
-        else:
-            get_logger().debug("No changes walkthrough found")
-    else:
-        base_description_str = description_full.strip()
-        return base_description_str, []
+    walkthrough_start = _find_walkthrough_start(description_full)
+    if walkthrough_start is None:
+        return description_full.strip(), []
+    base_description_str = description_full[:walkthrough_start].strip()
+    changes_walkthrough_str = description_full[walkthrough_start:]
+    files = []
 
     try:
         if changes_walkthrough_str:
@@ -1849,10 +1970,25 @@ def process_description(description_full: str) -> tuple[str, list]:
                         file_data = file_data[0]
                     res = _match_walkthrough_file(file_data)
                     if res and res.lastindex == 4:
-                        short_filename = res.group(1).strip()
-                        short_summary = res.group(2).strip()
-                        long_filename = res.group(3).strip()
-                        if long_filename.endswith('<ul>'):
+                        raw_filename = res.group(3)
+                        marker_match = re.match(
+                            re.escape(FILE_WALKTHROUGH_ESCAPED_MARKER) + r"[ \t]*\r?\n", raw_filename
+                        )
+                        escaped = marker_match is not None
+                        if escaped:
+                            short_filename = html.unescape(res.group(1))
+                            short_summary = html.unescape(res.group(2))
+                            # New rows encode filename line breaks, so only the first physical line is a path.
+                            filename_end = raw_filename.find("\n", marker_match.end())
+                            if filename_end == -1:
+                                filename_end = len(raw_filename)
+                            encoded_filename = raw_filename[marker_match.end():filename_end].removesuffix("\r")
+                            long_filename = html.unescape(encoded_filename)
+                        else:
+                            short_filename = res.group(1).strip()
+                            short_summary = res.group(2).strip()
+                            long_filename = raw_filename.strip()
+                        if not escaped and long_filename.endswith('<ul>'):
                             long_filename = long_filename[:-4].strip()
                         long_summary =  res.group(4).strip()
                         long_summary = long_summary.replace('<br> *', '\n*').replace('<br>','').replace('\n','<br>')
