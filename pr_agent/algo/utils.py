@@ -304,11 +304,10 @@ def convert_to_markdown_v2(output_data: dict,
                 else:
                     markdown_text += f"{emoji}&nbsp;<strong>{t('review.contains_tests')}</strong>"
                 markdown_text += "</td></tr>\n"
+            elif is_value_no(value):
+                markdown_text += f"### {emoji} {t('review.no_relevant_tests')}\n\n"
             else:
-                if is_value_no(value):
-                    markdown_text += f"### {emoji} {t('review.no_relevant_tests')}\n\n"
-                else:
-                    markdown_text += f"### {emoji} {t('review.contains_tests')}\n\n"
+                markdown_text += f"### {emoji} {t('review.contains_tests')}\n\n"
         elif 'ticket compliance check' in key_nice.lower():
             markdown_text = ticket_markdown_logic(emoji, markdown_text, value, gfm_supported)
         elif 'contribution time cost estimate' in key_nice.lower():
@@ -342,14 +341,13 @@ def convert_to_markdown_v2(output_data: dict,
                     value = _ci.emphasize_header(value.strip()) if isinstance(value, str) else _ci.as_review_text(value)
                     markdown_text += f"{value}"
                 markdown_text += "</td></tr>\n"
+            elif is_value_no(value):
+                markdown_text += f"### {emoji} {t('review.no_security_concerns')}\n\n"
             else:
-                if is_value_no(value):
-                    markdown_text += f"### {emoji} {t('review.no_security_concerns')}\n\n"
-                else:
-                    markdown_text += f"### {emoji} {t('review.security_concerns')}\n\n"
-                    value = _ci.emphasize_header(
-                        value.strip(), only_markdown=True) if isinstance(value, str) else _ci.as_review_text(value)
-                    markdown_text += f"{value}\n\n"
+                markdown_text += f"### {emoji} {t('review.security_concerns')}\n\n"
+                value = _ci.emphasize_header(
+                    value.strip(), only_markdown=True) if isinstance(value, str) else _ci.as_review_text(value)
+                markdown_text += f"{value}\n\n"
         elif key.lower() == 'structural_reach':
             markdown_text += render_structural_reach(value, gfm_supported)
         elif key.lower() in ('risk_checks', 'deterministic_risk'):
@@ -440,14 +438,13 @@ def convert_to_markdown_v2(output_data: dict,
                         markdown_text += f"<li>{priority_file}</li>\n"
                     markdown_text += "</ul>\n"
                 markdown_text += "</td></tr>\n"
+            elif not priority_files:
+                markdown_text += f"### {emoji} Priority files: None\n\n"
             else:
-                if not priority_files:
-                    markdown_text += f"### {emoji} Priority files: None\n\n"
-                else:
-                    markdown_text += f"### {emoji} Priority files\n\n"
-                    for priority_file in priority_files:
-                        markdown_text += f"- {priority_file}\n"
-                    markdown_text += "\n"
+                markdown_text += f"### {emoji} Priority files\n\n"
+                for priority_file in priority_files:
+                    markdown_text += f"- {priority_file}\n"
+                markdown_text += "\n"
         elif 'todo sections' in key_nice.lower():
             if gfm_supported:
                 markdown_text += "<tr><td>"
@@ -458,13 +455,12 @@ def convert_to_markdown_v2(output_data: dict,
                     markdown_text += f"{emoji}&nbsp;<strong>TODO sections</strong>\n<br><br>\n"
                     markdown_text += markdown_todo_items
                 markdown_text += "</td></tr>\n"
+            elif is_value_no(value):
+                markdown_text += "### ✅ No TODO sections\n\n"
             else:
-                if is_value_no(value):
-                    markdown_text += "### ✅ No TODO sections\n\n"
-                else:
-                    markdown_todo_items = format_todo_items(value, git_provider, gfm_supported)
-                    markdown_text += f"### {emoji} TODO sections\n\n"
-                    markdown_text += markdown_todo_items
+                markdown_todo_items = format_todo_items(value, git_provider, gfm_supported)
+                markdown_text += f"### {emoji} TODO sections\n\n"
+                markdown_text += markdown_todo_items
         elif 'can be split' in key_nice.lower():
             if gfm_supported:
                 markdown_text += "<tr><td>"
@@ -507,7 +503,7 @@ def convert_to_markdown_v2(output_data: dict,
                             issue_header = f"{issue_header} (confidence: {confidence:g})"
                         start_line = _as_line(issue.get('start_line')) or 0
                         end_line = _as_line(issue.get('end_line')) or start_line
-                        valid_lines = start_line > 0 and end_line >= start_line
+                        valid_lines = 0 < start_line <= end_line
                         if git_provider and valid_lines:
                             reference_link = git_provider.get_line_link(relevant_file, start_line, end_line)
                         else:
@@ -531,11 +527,10 @@ def convert_to_markdown_v2(output_data: dict,
                                     )
                             else:
                                 issue_str = f"<strong>{issue_header}</strong><br>{issue_content}"
+                        elif reference_link is not None and len(reference_link) > 0:
+                            issue_str = f"[**{issue_header}**]({reference_link})\n\n{issue_content}\n\n"
                         else:
-                            if reference_link is not None and len(reference_link) > 0:
-                                issue_str = f"[**{issue_header}**]({reference_link})\n\n{issue_content}\n\n"
-                            else:
-                                issue_str = f"**{issue_header}**\n\n{issue_content}\n\n"
+                            issue_str = f"**{issue_header}**\n\n{issue_content}\n\n"
                         improved_code = issue.get('improved_code')
                         if isinstance(improved_code, str) and improved_code.strip():
                             fix = improved_code.rstrip()
@@ -671,16 +666,15 @@ def ticket_markdown_logic(emoji, markdown_text, value, gfm_supported) -> str:
                 # Calculate individual ticket compliance level
                 if fully_compliant_str:
                     if not_compliant_str:
-                        ticket_compliance_level = 'Partially compliant'
+                        ticket_compliance_level = "Partially compliant"
+                    elif not requires_further_human_verification:
+                        ticket_compliance_level = "Fully compliant"
                     else:
-                        if not requires_further_human_verification:
-                            ticket_compliance_level = 'Fully compliant'
-                        else:
-                            ticket_compliance_level = 'PR Code Verified'
+                        ticket_compliance_level = "PR Code Verified"
                 elif not_compliant_str:
-                    ticket_compliance_level = 'Not compliant'
+                    ticket_compliance_level = "Not compliant"
                 elif requires_further_human_verification:
-                    ticket_compliance_level = 'PR Code Verified'
+                    ticket_compliance_level = "PR Code Verified"
 
                 # Store the compliance level for aggregation
                 if ticket_compliance_level:
@@ -1110,6 +1104,103 @@ def _has_yaml_c_loader_risk(response_text: str) -> bool:
     return False
 
 
+class _YamlScanWindow:
+    """Expose a bounded portion of a shared seekable stream to the YAML scanner."""
+
+    def __init__(self, stream, end):
+        self.stream = stream
+        self.end = end
+
+    def read(self, size=-1):
+        remaining = max(0, self.end - self.stream.tell())
+        return self.stream.read(remaining if size < 0 else min(size, remaining))
+
+
+def _extract_labelled_yaml_block(response_text: str) -> str | None:
+    """Extract the last nonempty mapping in a labelled YAML fence amid prose."""
+    lines = response_text.split('\n')
+    offsets = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line) + 1
+    stream = StringIO(response_text)
+    text_end = len(response_text)
+    i = 0
+    last_candidate = None
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if not (stripped.startswith('```yaml') or stripped.startswith('```yml')):
+            i += 1
+            continue
+
+        scan_offset = min(text_end, offsets[i] + len(line) + 1)
+        first_fence = i + 1
+        while first_fence < n and lines[first_fence].strip() != '```':
+            first_fence += 1
+        if first_fence < n:
+            window_end = min(text_end, offsets[first_fence] + len(lines[first_fence]) + 1)
+        else:
+            window_end = text_end
+
+        while True:
+            stream.seek(scan_offset)
+            scalar_spans = []
+            try:
+                scalar_spans.extend(
+                    (scan_offset + token.start_mark.index, scan_offset + token.end_mark.index)
+                    for token in yaml.scan(_YamlScanWindow(stream, window_end), Loader=yaml.SafeLoader)
+                    if isinstance(token, ScalarToken) and token.style in ('|', '>', "'", '"')
+                )
+            except yaml.YAMLError as error:
+                # An unfinished quoted scalar may contain the candidate fence. At a
+                # temporary boundary, keep it open until a wider scan decides it.
+                if (window_end < text_end and getattr(error, 'context', None) == 'while scanning a quoted scalar'
+                        and getattr(error, 'problem', None) == 'found unexpected end of stream'
+                        and getattr(error, 'context_mark', None) is not None):
+                    scalar_spans.append((scan_offset + error.context_mark.index, window_end + 1))
+                else:
+                    get_logger().debug("YAML scan ended at non-YAML content; keeping preceding scalar spans")
+
+            j = i + 1
+            fence_depth = 1
+            span_index = 0
+            while j < n and (offsets[j] < window_end or window_end == text_end):
+                j_stripped = lines[j].strip()
+                while span_index < len(scalar_spans) and offsets[j] >= scalar_spans[span_index][1]:
+                    span_index += 1
+                in_scalar = (span_index < len(scalar_spans)
+                             and scalar_spans[span_index][0] < offsets[j] < scalar_spans[span_index][1])
+                if j_stripped.startswith('```') and j_stripped != '```':
+                    fence_depth += 1
+                elif j_stripped == '```' and (fence_depth > 1 or not in_scalar):
+                    fence_depth -= 1
+                    if fence_depth == 0:
+                        break
+                j += 1
+            if j < n and offsets[j] < window_end and fence_depth == 0:
+                break
+            if window_end == text_end:
+                break
+            # Geometric growth keeps repeated scans linear even when thousands
+            # of fences are inside one long quoted or block scalar.
+            target = min(text_end, max(window_end + 1, scan_offset + 2 * (window_end - scan_offset)))
+            newline = response_text.find('\n', target)
+            window_end = text_end if newline < 0 else newline + 1
+
+        candidate = '\n'.join(lines[i + 1:j])
+        try:
+            parsed = yaml.safe_load(candidate)
+            if isinstance(parsed, dict) and parsed:
+                last_candidate = candidate
+        except Exception:
+            get_logger().debug("Labelled YAML block parse failed")
+        i = j + 1
+    return last_candidate
+
+
 def _load_yaml_initial(response_text: str) -> Any:
     """Parse initial YAML with LibYAML while preserving SafeLoader edge-case semantics."""
     if _YAML_C_SAFE_LOADER is None:
@@ -1166,6 +1257,20 @@ def load_yaml(response_text: str, keys_fix_yaml: list[str] | None = None, first_
         data = _load_yaml_initial(response_text)
     except Exception as e:
         get_logger().warning(f"Initial failure to parse AI prediction: {e}")
+        # The fence stripping above is anchored at the start of the response, so when
+        # the labelled YAML block sits mid-text (for example after a code example the
+        # model included for explanation), the surrounding prose and the other fence
+        # pairs defeat both the initial parse and the trailing-fence retry. Extract the
+        # labelled block's content directly before handing off to the repair pipeline.
+        labelled_block = _extract_labelled_yaml_block(response_text)
+        if labelled_block is not None:
+            try:
+                candidate = _load_yaml_initial(labelled_block)
+                if isinstance(candidate, dict) and candidate:
+                    get_logger().info("Recovered labelled YAML block embedded in prose")
+                    return candidate
+            except Exception as e:
+                get_logger().debug(f"Mid-text YAML block parse failed: {e}")
         separators = str.maketrans({"\u2028": " ", "\u2029": " "})
         response_text = response_text.translate(separators)
         response_text_original_sanitized = response_text_original_sanitized.translate(separators)
@@ -1266,7 +1371,7 @@ def try_fix_yaml(response_text: str,
             get_logger().info("Successfully parsed AI prediction after replacing | with |2 and adding spaces")
             return data
     except Exception:
-        pass
+        get_logger().debug("YAML spacing fallback failed; trying the next recovery method")
 
     # second fallback - try to extract only range from first ```yaml to the last ```
     snippet_pattern = r'```[ \t]*(?:(?i:yaml|yml)[ \t]*)?\r?\n([\s\S]*?)```(?=\s*$|")'
@@ -1283,6 +1388,23 @@ def try_fix_yaml(response_text: str,
                 return data
         except Exception as e:
             get_logger().debug(f"Failed to parse AI prediction after extracting yaml snippet: {e}")
+
+
+    # A preceding code example can make the generic fence match start at its
+    # closing fence. Retry the final explicitly labelled YAML block in that case.
+    yaml_fences = list(re.finditer(r'(?im)^```(?:yaml|yml)[ \t]*\r?\n', response_text_original))
+    if yaml_fences and response_text_original.rstrip().endswith('```'):
+        # Extract content between the last YAML fence and the final ```
+        fence_start = yaml_fences[-1].end()
+        fence_end = response_text_original.rfind('```')
+        if fence_end > fence_start:
+            snippet_text = response_text_original[fence_start:fence_end].rstrip()
+            try:
+                data = _parse_yaml(snippet_text)
+                if isinstance(data, dict) and data:
+                    return data
+            except Exception as e:
+                get_logger().debug(f"Trailing labelled YAML fence retry failed: {e}")
 
 
     # third fallback - try to remove leading and trailing curly brackets
@@ -2004,11 +2126,10 @@ def process_description(description_full: str) -> tuple[str, list]:
                             'short_summary': short_summary,
                             'long_summary': long_summary
                         })
+                    elif '<code>...</code>' in file_data:
+                        pass # PR with many files. some did not get analyzed
                     else:
-                        if '<code>...</code>' in file_data:
-                            pass # PR with many files. some did not get analyzed
-                        else:
-                            get_logger().warning("Failed to parse description", artifact={'description': file_data})
+                        get_logger().warning("Failed to parse description", artifact={'description': file_data})
                 except Exception as e:
                     get_logger().exception(f"Failed to process description: {e}", artifact={'description': file_data})
 
