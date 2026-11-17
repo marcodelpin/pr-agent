@@ -357,9 +357,10 @@ def run(inargs=None, args=None):
             diff_mode and getattr(args, "json_output", None) is not None
             and command in _JSON_REVIEW_COMMANDS | _JSON_DESCRIBE_COMMANDS
         )
-        if (settings.config.get("propagate_command_errors", False) or json_artifact_required) and (
+        # Exit non-zero on a swallowed failure too; leave hosted --output failures to the checks below.
+        if not hosted_markdown_output and (
             result is False or recorded_failure
-            or ((label_json_required or ask_json_required) and result is RequestOutcome.SKIPPED)
+            or (json_artifact_required and result is RequestOutcome.SKIPPED)
         ):
             if result is not False and recorded_failure:
                 get_logger().warning("Command reported success but recorded a failure; exiting with an error")

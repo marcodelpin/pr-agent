@@ -157,9 +157,7 @@ claude_adaptive_thinking_models_override = []
 # When non-empty, this list fully replaces the built-in defaults (see CLAUDE_EXTENDED_THINKING_MODELS
 # in pr_agent/algo/__init__.py). Leave empty to use the defaults.
 claude_extended_thinking_models_override = []
-# Extract issue number from PR source branch name (e.g. feature/1-auth-google -> issue #1). When true, branch-derived
-# issue URLs are merged with tickets from the PR description for compliance. Set to false to restore description-only behaviour.
-# Note: Branch-name extraction is GitHub-only for now; other providers planned for later.
+# Infer branch issues on GitHub and same-project GitLab (`123-...`); false disables. See https://docs.pr-agent.ai/core-abilities/fetching_ticket_context/.
 extract_issue_from_branch = true
 # Optional: custom regex with one or more capturing groups for the issue number (validated at runtime); only the
 # first group is used. If the regex has no capturing group, the default pattern is used; if it does not compile,
@@ -522,11 +520,12 @@ project_keys = ["*"]
 # use_client = false
 # drop_params = false
 enable_callbacks = false
-add_session_id_to_requests = false # send a stable x-litellm-session-id header derived from the PR URL, so LiteLLM groups every request for the same PR into one session
+add_session_id_to_requests = false # send a stable session id derived from the PR URL as x-litellm-session-id (LiteLLM session grouping) and the provider's session header (e.g. x-opencode-session)
 success_callback = [] # process-wide: only the deployment's configuration and environment set it, not a repo's .pr_agent.toml; in the Action, use a workflow env entry
 failure_callback = [] # process-wide, set like success_callback
 service_callback = [] # process-wide, set like success_callback
 turn_off_message_logging = false # set true to keep prompt/response content (the whole PR diff) out of callback payloads; strongly recommended with the "otel" callback
+suppress_debug_info = true # hide LiteLLM's "Give Feedback / Get Help" stdout banner on provider errors; process-wide, set like success_callback
 # Optional: forward a fixed custom_llm_provider to LiteLLM, so a raw hosted model id
 # (e.g. "claude-sonnet-4-5") reaches the provider unchanged instead of being rewritten
 # by LiteLLM's prefix inference. Empty = let LiteLLM infer the provider from the model name.
