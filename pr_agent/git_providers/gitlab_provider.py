@@ -2850,7 +2850,8 @@ class GitLabProvider(GitProvider):
         if body and body not in recent:
             recent.append(body)
 
-    def _record_if_unconfirmed_suggestion_write(self, error, body, store, body_fp, code_fp, as_draft) -> bool:
+    @staticmethod
+    def _suggestion_write_may_have_landed(error) -> bool:
         if isinstance(error, (ConnectTimeout, InvalidHeader, InvalidSchema, InvalidURL, MissingSchema)):
             return False  # The request never reached GitLab.
         if isinstance(error, RequestsConnectionError):
@@ -2864,7 +2865,10 @@ class GitLabProvider(GitProvider):
         status = getattr(error, "response_code", None)
         if status is None:
             status = getattr(getattr(error, "response", None), "status_code", None)
-        if isinstance(status, int) and 400 <= status < 500 and status != 408:
+        return not (isinstance(status, int) and 400 <= status < 500 and status != 408)
+
+    def _record_if_unconfirmed_suggestion_write(self, error, body, store, body_fp, code_fp, as_draft) -> bool:
+        if not self._suggestion_write_may_have_landed(error):
             return False
         get_logger().warning(
             f"GitLab did not confirm suggestion creation for MR {self.id_mr}; "
@@ -2939,6 +2943,42 @@ class GitLabProvider(GitProvider):
                                                         original_suggestion, store, body_fp, code_fp)
             return created
 
+    def _post_file_level_fallback(self, as_draft: bool, body_fallback: str, diff, target_file) -> None:
+        """Post the general file note as a resolvable file-level thread (position_type 'file').
+
+        The notes endpoint ignores a position, so a note posted there is standalone and cannot be
+        resolved. If GitLab rejects the file position (e.g. an older self-managed version), post the
+        plain note instead. Only a failure that cannot have created the thread (a 4xx, or one before
+        the request reached GitLab) falls back; any other propagates so the caller does not post a
+        duplicate."""
+        new_path = target_file.filename
+        file_position = {
+            'base_sha': diff.base_commit_sha,
+            'start_sha': diff.start_commit_sha,
+            'head_sha': diff.head_commit_sha,
+            'position_type': 'file',
+            'new_path': new_path,
+            'old_path': getattr(target_file, 'old_filename', None) or new_path,
+        }
+        try:
+            if as_draft:
+                self.mr.draft_notes.create({'note': body_fallback, 'position': file_position})
+            else:
+                self.mr.discussions.create({'body': body_fallback, 'position': file_position})
+        except (GitlabError, RequestException) as error:
+            if self._suggestion_write_may_have_landed(error):
+                raise
+            get_logger().debug(f"File-level position not accepted for {new_path} in MR {self.id_mr}; "
+                               f"posting a plain note: {error}")
+            if as_draft:
+                self.mr.draft_notes.create({'note': body_fallback})
+            else:
+                self.mr.notes.create({'body': body_fallback})
+        if as_draft:
+            self._code_suggestion_draft_queued = True
+        else:
+            self._remember_published_inline_comment_body(body_fallback)
+
     def _create_suggestion_note(self, as_draft: bool, body: str, pos_obj: dict, diff, target_file,
                                 relevant_file: str, original_suggestion, store, body_fp, code_fp) -> bool:
         """Creates the anchored suggestion comment, falling back to a general file note if GitLab
@@ -2946,7 +2986,14 @@ class GitLabProvider(GitProvider):
         attempt succeeded."""
         try:
             if as_draft:
-                self.mr.draft_notes.create({'note': body, 'position': pos_obj})
+                draft = self.mr.draft_notes.create({'note': body, 'position': pos_obj})
+                if self._is_unanchored_line_draft(draft):
+                    # draft_notes.create accepts a line position outside the diff (line_code null) where
+                    # discussions.create returns 400; bulk_publish then fails on it or leaves it pending.
+                    self._delete_unanchored_draft(draft)
+                    # A 4xx keeps _record_if_unconfirmed_suggestion_write from treating this as a landed write.
+                    raise GitlabCreateError("GitLab could not anchor the draft note to a diff line",
+                                            response_code=400)
                 self._code_suggestion_draft_queued = True
             else:
                 self.mr.discussions.create({'body': body, 'position': pos_obj})
@@ -3007,21 +3054,9 @@ class GitLabProvider(GitProvider):
                 # A review finding's markers let the reviewer verify this note and skip it on the next run.
                 body_fallback = body_with_carried_markers(
                     body_fallback, body, getattr(self, "max_comment_chars", None))
-                # Create a general note on the file in the MR
-                fallback_position = {
-                    'base_sha': diff.base_commit_sha,
-                    'start_sha': diff.start_commit_sha,
-                    'head_sha': diff.head_commit_sha,
-                    'position_type': 'text',
-                    'file_path': f'{target_file.filename}',
-                }
+                # Post a resolvable file-level thread; a plain note is the fallback (see _post_file_level_fallback)
                 fallback_create_attempted = True
-                if as_draft:
-                    self.mr.draft_notes.create({'note': body_fallback, 'position': fallback_position})
-                    self._code_suggestion_draft_queued = True
-                else:
-                    self.mr.notes.create({'body': body_fallback, 'position': fallback_position})
-                    self._remember_published_inline_comment_body(body_fallback)
+                self._post_file_level_fallback(as_draft, body_fallback, diff, target_file)
                 get_logger().debug(f"Created fallback comment in MR {self.id_mr} with position {pos_obj}")
                 if store is not None:
                     store.add(body_fp)
@@ -3058,13 +3093,51 @@ class GitLabProvider(GitProvider):
             return None
         return latest_diff
 
+    @staticmethod
+    def _is_unanchored_line_draft(draft) -> bool:
+        if getattr(draft, 'line_code', '') is not None:
+            return False
+        position = getattr(draft, 'position', None)
+        return isinstance(position, dict) and (position.get('new_line') is not None
+                                               or position.get('old_line') is not None)
+
+    def _delete_unanchored_draft(self, draft) -> bool:
+        try:
+            draft.delete()
+            return True
+        except (GitlabError, RequestException) as e:
+            get_logger().error(f"Could not delete unanchored draft note {getattr(draft, 'id', None)} in MR "
+                               f"{self.id_mr}; it may stay pending: {e}")
+            return False
+
+    def _remember_published_draft(self, draft) -> None:
+        body = getattr(draft, "note", "") or ""
+        if body:
+            self._remember_published_inline_comment_body(body)
+
     def _publish_suggestion_drafts(self, pending) -> None:
-        if pending:
+        # Drafts GitLab could not anchor never publish, so drop them rather than record them as published.
+        unanchored = [draft for draft in pending if self._is_unanchored_line_draft(draft)]
+        all_deleted = all([self._delete_unanchored_draft(draft) for draft in unanchored])
+        pending = [draft for draft in pending if draft not in unanchored]
+        if not pending:
+            return
+        if all_deleted:
             self.mr.draft_notes.bulk_publish()
             for draft in pending:
-                body = getattr(draft, "note", "") or ""
-                if body:
-                    self._remember_published_inline_comment_body(body)
+                self._remember_published_draft(draft)
+            return
+        # bulk_publish would include the undeletable draft, and GitLab before 19.6 fails the whole batch on it.
+        first_error = None
+        for draft in pending:
+            try:
+                draft.publish()
+            except (GitlabError, RequestException) as e:
+                first_error = first_error or e
+                continue
+            self._remember_published_draft(draft)
+        if first_error is not None:
+            raise first_error
 
     def publish_code_suggestions(self, code_suggestions: list) -> bool:
         # Runs first so the fingerprints it frees are in the store before any dedup lookup.
@@ -3160,9 +3233,9 @@ class GitLabProvider(GitProvider):
                     if relevant_line_in_file is None:
                         get_logger().warning(f"Skipping suggestion: no source line for '{relevant_file}'")
                         continue
-                    # Keep the existing fallback path for anchors outside the diff. GitLab will
-                    # reject the optimistic addition position and _create_suggestion_note will
-                    # publish the general file note instead.
+                    # Keep the existing fallback path for anchors outside the diff. GitLab rejects
+                    # the optimistic addition position (a draft comes back without a line_code) and
+                    # _create_suggestion_note publishes the general file note instead.
                     source_line_no = -1
                     target_line_no = relevant_lines_start + 1
                     found = True

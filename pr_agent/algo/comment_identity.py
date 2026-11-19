@@ -32,6 +32,8 @@ class PRCodeSuggestionsIdentity(StrEnum):
 class PRCommandNoticeIdentity(StrEnum):
     INCOMPLETE_BITBUCKET_FILES = "<!-- pr-agent:bitbucket-incomplete-files -->"
     REVIEWED_COMMITS = "<!-- pr-agent:review:commits -->"
+    UNCHANGED_DIFF = "<!-- pr-agent:unchanged-diff -->"
+    REVIEW_FAILURE = "<!-- pr-agent:review:failure -->"
 
 
 class PRDescriptionHeader(StrEnum):
@@ -55,6 +57,8 @@ _ALL_COMMENT_IDENTITIES = (
     PRCodeSuggestionsIdentity.UNANCHORED.value,
     PRCommandNoticeIdentity.INCOMPLETE_BITBUCKET_FILES.value,
     PRCommandNoticeIdentity.REVIEWED_COMMITS.value,
+    PRCommandNoticeIdentity.UNCHANGED_DIFF.value,
+    PRCommandNoticeIdentity.REVIEW_FAILURE.value,
     PRDescriptionIdentity.PERSISTENT.value,
     PRApprovalIdentity.AUTO.value,
 )

@@ -131,6 +131,7 @@ See [Configuration options](../usage-guide/configuration_options.md#global-confi
 | `bot_user_indicators` | ["codium", "bot_", "bot-", "_bot", "-bot"] | Substring indicators used to skip bot users on webhook events. Currently consumed by the GitLab webhook (`is_bot_user`); other providers may adopt this list in future. The match is case-insensitive against the sender's display name. Overriding this setting REPLACES the default list — include the entries below in your override if you want to keep them (e.g. `["codium", "bot_", "bot-", "_bot", "-bot", "renovate"]`). |
 | `restricted_mode` | false | when true, skip operations that require elevated permissions (e.g. pushing code to the repository) |
 | `is_auto_command` | false | will be auto-set to true if the command is triggered by an automation |
+| `skip_unchanged_diff` | false | skip automatic or CLI /review and /describe when the PR is unchanged since their last successful run. See docs/docs/usage-guide/automations_and_usage.md |
 | `propagate_command_errors` | false | when true, a command re-raises instead of swallowing an internal error, so a caller can tell a failed run from an empty one |
 | `enable_ai_metadata` | false | will enable adding ai metadata |
 | `add_user_to_requests` | false | send the current command and PR URL in the OpenAI-compatible "user" request field, for provider-side attribution of requests (e.g. OpenRouter "external_user") |
@@ -177,7 +178,7 @@ See [Review](../commands/review.md#configuration-options).
 | `require_priority_files` | false | ask the model which files a human should inspect first |
 | `structural_reach_input_file` | "" | JSON reach facts from a build-graph tool; when the file exists, adds a deterministic change-risk row. See docs/docs/commands/review.md |
 | `enable_risk_checks` | true | Flag sensitive paths and risky change shapes; adds nothing when clean. See docs/docs/commands/review.md |
-| `sensitive_paths` | [".github/workflows/**", ".gitlab-ci.yml", "Jenkinsfile*", ".circleci/**", "azure-pipelines*.yml", ".travis.yml", "bitbucket-pipelines.yml", "*CODEOWNERS", ".pr_agent.toml", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "requirements*.txt", "Pipfile", "Pipfile.lock", "pyproject.toml", "poetry.lock", "uv.lock", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "pom.xml", "build.gradle*", "Gemfile", "Gemfile.lock", "composer.json", "composer.lock", "*Dockerfile*", "docker-compose*.yml", "docker-compose*.yaml", "*.dockerfile", "*.tf", "*.tfvars", "*.hcl", "*migrations*/**", "*migration*", "db/migrate/**", "alembic/**"] | Glob patterns of sensitive paths flagging deterministic review risk findings. See docs/docs/commands/review.md |
+| `sensitive_paths` | [".github/workflows/**", ".github/actions/**", ".gitlab-ci.yml", "Jenkinsfile*", ".circleci/**", "azure-pipelines*.yml", ".travis.yml", "bitbucket-pipelines.yml", "*CODEOWNERS", ".pr_agent.toml", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "requirements*.txt", "Pipfile", "Pipfile.lock", "pyproject.toml", "poetry.lock", "uv.lock", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "pom.xml", "build.gradle*", "Gemfile", "Gemfile.lock", "composer.json", "composer.lock", "*Dockerfile*", "docker-compose*.yml", "docker-compose*.yaml", "*.dockerfile", "*.tf", "*.tfvars", "*.hcl", "*migrations*/**", "*migration*", "db/migrate/**", "alembic/**"] | Glob patterns of sensitive paths flagging deterministic review risk findings. See docs/docs/commands/review.md |
 | `extra_risky_shapes` | [] | Custom regex patterns flagging risky changes in diff hunks. See docs/docs/commands/review.md |
 **general options**
 
@@ -526,7 +527,7 @@ See [Changing a model](../usage-guide/changing_a_model.md#changing-a-model-in-pr
 | `success_callback` | [] | process-wide: only the deployment's configuration and environment set it, not a repo's .pr_agent.toml; in the Action, use a workflow env entry |
 | `failure_callback` | [] | process-wide, set like success_callback |
 | `service_callback` | [] | process-wide, set like success_callback |
-| `turn_off_message_logging` | false | set true to keep prompt/response content (the whole PR diff) out of callback payloads; strongly recommended with the "otel" callback |
+| `turn_off_message_logging` | false | omit prompts/responses from LiteLLM callbacks and PR-Agent's LiteLLM logs; recommended with the "otel" callback |
 | `suppress_debug_info` | true | hide LiteLLM's "Give Feedback / Get Help" stdout banner on provider errors; process-wide, set like success_callback |
 | `custom_llm_provider` | "" | Optional: forward a fixed custom_llm_provider to LiteLLM, so a raw hosted model id (e.g. "claude-sonnet-4-5") reaches the provider unchanged instead of being rewritten by LiteLLM's prefix inference. Empty = let LiteLLM infer the provider from the model name. |
 | `force_streaming_custom_llm_provider` | "" | Force streaming when the request matches this provider AND its api_base contains one of the substrings below. Some OpenAI-compatible endpoints return a response that LiteLLM cannot normalize in non-streaming mode. Both must be set for the workaround to apply. |
