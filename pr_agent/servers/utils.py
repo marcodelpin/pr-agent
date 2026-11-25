@@ -6,7 +6,7 @@ import re
 import secrets
 import time
 from collections import defaultdict
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -108,6 +108,19 @@ def host_settings_unavailable() -> bool:
     source = context.get("automatic_host_settings_source")
     payloads = context.get("extra_config_payloads") or {}
     return bool(source) and source in payloads and payloads[source] is None
+
+
+async def preload_host_settings_for_new_automatic_event() -> bool:
+    """Preload the external Host source before repository settings for automatic events."""
+    source = get_settings().get("CONFIG.EXTRA_CONFIG_URL")
+    if source is None or source is False:
+        return True
+    if not isinstance(source, str):
+        get_logger().warning("Request ignored: invalid Host settings source")
+        return False
+    if not source.strip():
+        return True
+    return await load_host_settings_for_webhook() and not host_settings_unavailable()
 
 
 def payload_log_summary(data: object, identifying_fields: Sequence[str] = ()) -> dict:
@@ -258,8 +271,8 @@ class DefaultDictWithTimeout(defaultdict):
 
     def __init__(
         self,
-        default_factory: Callable[[], Any] = None,
-        ttl: int = None,
+        default_factory: Callable[[], Any] | None = None,
+        ttl: int | None = None,
         refresh_interval: int = 60,
         update_key_time_on_get: bool = True,
         *args,
@@ -349,7 +362,7 @@ def _get_push_trigger_state(key: str, ttl: int | None) -> _PushTriggerState:
 
 
 @asynccontextmanager
-async def push_trigger_slot(key: str, *, allow_backlog: bool, ttl: int | None) -> AsyncIterator[bool]:
+async def push_trigger_slot(key: str, *, allow_backlog: bool, ttl: int | None) -> AsyncGenerator[bool, None]:
     """Run one push per PR, optionally keeping one delegate for subsequent pushes.
 
     State is process-local. TTL bounds idle cache retention; active runs and
